@@ -1,0 +1,85 @@
+{
+  "version": "0.1.0",
+  "keywords": ["strapi", "strapi5", "strapi-plugin", "webp", "upload", "media", "s3"],
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "exports": {
+    "./package.json": "./package.json",
+    "./strapi-admin": {
+      "types": "./dist/admin/src/index.d.ts",
+      "source": "./admin/src/index.ts",
+      "import": "./dist/admin/index.mjs",
+      "require": "./dist/admin/index.js",
+      "default": "./dist/admin/index.js"
+    },
+    "./strapi-server": {
+      "types": "./dist/server/src/index.d.ts",
+      "source": "./server/src/index.ts",
+      "import": "./dist/server/index.mjs",
+      "require": "./dist/server/index.js",
+      "default": "./dist/server/index.js"
+    }
+  },
+  "files": ["dist", "LICENSE", "README.md"],
+  "scripts": {
+    "build": "strapi-plugin build",
+    "prepublishOnly": "strapi-plugin build",
+    "watch": "strapi-plugin watch",
+    "watch:link": "strapi-plugin watch:link",
+    "verify": "strapi-plugin verify",
+    "test:ts:front": "run -T tsc -p admin/tsconfig.json",
+    "test:ts:back": "run -T tsc -p server/tsconfig.json"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.758.0",
+    "file-type": "16.5.4",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "@strapi/design-system": "^2.0.0-rc.30",
+    "@strapi/icons": "^2.0.0-rc.30",
+    "@strapi/sdk-plugin": "^6.0.1",
+    "@strapi/strapi": "^5.33.0",
+    "@strapi/typescript-utils": "^5.33.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "prettier": "^3.8.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-intl": "^6.8.9",
+    "react-router-dom": "^6.30.3",
+    "styled-components": "^6.4.0",
+    "typescript": "^5.6.0"
+  },
+  "peerDependencies": {
+    "@strapi/design-system": "^2.0.0-rc.30",
+    "@strapi/icons": "^2.0.0-rc.30",
+    "@strapi/sdk-plugin": "^6.0.0",
+    "@strapi/strapi": "^5.0.0",
+    "@strapi/utils": "^5.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.0.0",
+    "styled-components": "^6.0.0"
+  },
+  "strapi": {
+    "kind": "plugin",
+    "name": "strapi-media-webp-convertor",
+    "displayName": "Media WebP & migration",
+    "description": "WebP upload optimization, tunable quality, and S3 / URL migration helpers."
+  },
+  "name": "strapi-plugin-media-webp-convertor",
+  "description": "Strapi 5 plugin: WebP upload optimization, admin quality settings, and migration helpers for S3 + DB URLs.",
+  "license": "MIT",
+  "author": "girish-soman",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/giri943/strapi-plugin-media-webp-convertor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/giri943/strapi-plugin-media-webp-convertor/issues"
+  },
+  "homepage": "https://github.com/giri943/strapi-plugin-media-webp-convertor#readme"
+}
