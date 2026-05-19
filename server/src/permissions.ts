@@ -10,6 +10,8 @@ export const PLUGIN_ACTIONS = {
   migrationS3Copy: `plugin::${PLUGIN_NAME}.migration.batch-copy`,
   /** S3 batched delete route — kept separate so copy access does not imply destructive delete access. */
   migrationS3Delete: `plugin::${PLUGIN_NAME}.migration.batch-delete`,
+  conversionList: `plugin::${PLUGIN_NAME}.conversion.list`,
+  conversionConvert: `plugin::${PLUGIN_NAME}.conversion.convert`,
 } as const;
 
 /**
@@ -55,6 +57,20 @@ export const permissionActionDefinitions = [
   {
     uid: 'migration.batch-delete',
     displayName: 'Run batched S3 delete — permanently removes objects (ephemeral credentials)',
+    pluginName: PLUGIN_NAME,
+    section: 'plugins' as const,
+    subCategory: 'media',
+  },
+  {
+    uid: 'conversion.list',
+    displayName: 'List existing images for WebP conversion',
+    pluginName: PLUGIN_NAME,
+    section: 'plugins' as const,
+    subCategory: 'media',
+  },
+  {
+    uid: 'conversion.convert',
+    displayName: 'Convert existing images to WebP (replaces files in storage)',
     pluginName: PLUGIN_NAME,
     section: 'plugins' as const,
     subCategory: 'media',
