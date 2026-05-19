@@ -172,6 +172,12 @@ export type ConversionBatchResult = {
   converted: number;
   failed: number;
   errors: { id: number; name: string; error: string }[];
+  /** KB of the original files that were successfully converted. */
+  originalKB: number;
+  /** KB of the resulting WebP files. */
+  newKB: number;
+  /** originalKB − newKB (can be negative if WebP is somehow larger). */
+  savedKB: number;
 };
 
 export async function getConversionStats(): Promise<ConversionStats> {

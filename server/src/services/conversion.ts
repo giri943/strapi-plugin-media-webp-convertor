@@ -100,6 +100,8 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
       let converted = 0;
       let failed = 0;
       const errors: { id: number; name: string; error: string }[] = [];
+      let totalOriginalKB = 0;
+      let totalNewKB = 0;
 
       for (const record of records) {
         if (!CONVERTIBLE_MIMES.has(record.mime)) continue;
@@ -109,12 +111,14 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
           const origBuf = await downloadBuffer(record.url, publicDir);
           const webpBuf = await toWebPBuffer(origBuf, quality);
 
+          const newSizeKB = Math.round((webpBuf.length / 1024) * 100) / 100;
+
           const newMainFile: any = {
             name: swapToWebpName(record.name),
             hash: record.hash,
             ext: '.webp',
             mime: 'image/webp',
-            size: Math.round((webpBuf.length / 1024) * 100) / 100,
+            size: newSizeKB,
             buffer: webpBuf,
           };
           await provider.upload(newMainFile);
@@ -177,6 +181,8 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
             await provider.delete({ url: record.url, hash: record.hash, ext: record.ext, name: record.name });
           } catch {}
 
+          totalOriginalKB += record.size;
+          totalNewKB += newSizeKB;
           converted++;
         } catch (err) {
           failed++;
@@ -188,7 +194,14 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
         }
       }
 
-      return { converted, failed, errors };
+      return {
+        converted,
+        failed,
+        errors,
+        originalKB: totalOriginalKB,
+        newKB: totalNewKB,
+        savedKB: totalOriginalKB - totalNewKB,
+      };
     },
   };
 };

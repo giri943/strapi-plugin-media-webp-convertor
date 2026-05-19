@@ -1175,7 +1175,22 @@ const MigrationPanel = () => {
 /*  Convert existing images tab                                         */
 /* ------------------------------------------------------------------ */
 
-type FileConvStatus = { status: 'converting' | 'done' | 'error'; error?: string };
+type FileConvStatus = {
+  status: 'converting' | 'done' | 'error';
+  error?: string;
+  originalKB?: number;
+  newKB?: number;
+};
+
+function formatSize(kb: number): string {
+  return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.round(kb)} KB`;
+}
+
+function savingsSummary(savedKB: number, originalKB: number): string {
+  if (originalKB <= 0 || savedKB <= 0) return '';
+  const pct = Math.round((savedKB / originalKB) * 100);
+  return `Saved ${formatSize(savedKB)} · ${pct}% smaller`;
+}
 
 const BATCH_SIZE = 10;
 const LIST_PAGE_SIZE = 20;
@@ -1202,6 +1217,8 @@ const ConversionPanel = () => {
   const [bulkConverted, setBulkConverted] = useState(0);
   const [bulkTotal, setBulkTotal] = useState(0);
   const [bulkDone, setBulkDone] = useState(false);
+  const [bulkSavedKB, setBulkSavedKB] = useState(0);
+  const [bulkOriginalKB, setBulkOriginalKB] = useState(0);
   const bulkStopRef = useRef(false);
 
   const [msg, setMsg] = useState<string | null>(null);
@@ -1250,7 +1267,7 @@ const ConversionPanel = () => {
     try {
       const r = await postConversionBatch({ fileIds: [file.id], quality: effectiveQuality });
       if (r.converted > 0) {
-        setFileStatus(file.id, { status: 'done' });
+        setFileStatus(file.id, { status: 'done', originalKB: file.size, newKB: r.newKB });
         void loadStats();
       } else {
         const err = r.errors[0];
@@ -1279,11 +1296,15 @@ const ConversionPanel = () => {
     setBulkRunning(true);
     setBulkConverted(0);
     setBulkDone(false);
+    setBulkSavedKB(0);
+    setBulkOriginalKB(0);
     setBulkTotal(toConvert);
     setMsg(null);
     setFileStatuses(new Map());
 
     let localConverted = 0;
+    let localSavedKB = 0;
+    let localOriginalKB = 0;
 
     try {
       // Collect all convertible IDs (up to ID_COLLECT_LIMIT)
@@ -1303,7 +1324,11 @@ const ConversionPanel = () => {
         const batch = allIds.slice(i, i + BATCH_SIZE);
         const r = await postConversionBatch({ fileIds: batch, quality: effectiveQuality });
         localConverted += r.converted;
+        localSavedKB += r.savedKB;
+        localOriginalKB += r.originalKB;
         setBulkConverted(localConverted);
+        setBulkSavedKB(localSavedKB);
+        setBulkOriginalKB(localOriginalKB);
         for (const id of batch) {
           const err = r.errors.find((e) => e.id === id);
           setFileStatus(id, err ? { status: 'error', error: err.error } : { status: 'done' });
@@ -1312,11 +1337,13 @@ const ConversionPanel = () => {
 
       if (bulkStopRef.current) {
         setMsgVariant('warning');
-        setMsg(`Stopped after converting ${localConverted.toLocaleString()} file(s). Run Convert All again to resume.`);
+        const savings = savingsSummary(localSavedKB, localOriginalKB);
+        setMsg(`Stopped after converting ${localConverted.toLocaleString()} file(s).${savings ? ` ${savings}.` : ''} Run Convert All again to resume.`);
       } else {
         setBulkDone(true);
         setMsgVariant('success');
-        setMsg(`Done — ${localConverted.toLocaleString()} file${localConverted === 1 ? '' : 's'} converted to WebP.`);
+        const savings = savingsSummary(localSavedKB, localOriginalKB);
+        setMsg(`Done — ${localConverted.toLocaleString()} file${localConverted === 1 ? '' : 's'} converted to WebP.${savings ? ` ${savings}.` : ''}`);
       }
       void loadStats();
       void loadFiles(filesPage);
@@ -1427,9 +1454,16 @@ const ConversionPanel = () => {
           {/* Progress bar (shown during / after bulk run) */}
           {(bulkRunning || bulkDone) && bulkTotal > 0 && (
             <Box padding={4} background="neutral100" hasRadius borderColor="neutral150" borderStyle="solid" borderWidth="1px">
-              <Typography variant="omega" fontWeight="bold" textColor="neutral800">
-                {bulkConverted.toLocaleString()} / {bulkTotal.toLocaleString()} converted ({bulkProgressPct}%)
-              </Typography>
+              <Flex justifyContent="space-between" alignItems="baseline" wrap="wrap" gap={2}>
+                <Typography variant="omega" fontWeight="bold" textColor="neutral800">
+                  {bulkConverted.toLocaleString()} / {bulkTotal.toLocaleString()} converted ({bulkProgressPct}%)
+                </Typography>
+                {bulkSavedKB > 0 && (
+                  <Typography variant="pi" style={{ color: '#328048', fontWeight: 600 }}>
+                    {savingsSummary(bulkSavedKB, bulkOriginalKB)}
+                  </Typography>
+                )}
+              </Flex>
               <Box paddingTop={2} width="100%">
                 <ProgressBar value={bulkProgressPct} max={100} />
               </Box>
@@ -1577,9 +1611,19 @@ const ConversionPanel = () => {
 
                       {/* Status */}
                       {isDone && (
-                        <Typography variant="pi" style={{ color: '#328048', fontWeight: 600, whiteSpace: 'nowrap' }}>
-                          ✓ Converted
-                        </Typography>
+                        <Flex direction="column" alignItems="flex-end" gap={0} style={{ whiteSpace: 'nowrap' }}>
+                          <Typography variant="pi" style={{ color: '#328048', fontWeight: 600 }}>
+                            ✓ Converted
+                          </Typography>
+                          {fileStatus?.originalKB != null && fileStatus?.newKB != null && (
+                            <Typography variant="pi" textColor="neutral500">
+                              {formatSize(fileStatus.originalKB)} → {formatSize(fileStatus.newKB)}
+                              {fileStatus.originalKB > 0
+                                ? ` (−${Math.round(((fileStatus.originalKB - fileStatus.newKB) / fileStatus.originalKB) * 100)}%)`
+                                : ''}
+                            </Typography>
+                          )}
+                        </Flex>
                       )}
                       {isError && (
                         <Typography
