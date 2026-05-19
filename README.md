@@ -3,7 +3,7 @@
 Strapi 5 plugin with three features:
 
 1. **Auto WebP conversion** — every raster image uploaded through the Strapi media library is converted to WebP on the fly (configurable quality, SVG passthrough with security checks).
-2. **Convert existing images** — admin UI to batch-convert images already in the media library to WebP, replacing the original files in storage and updating the database records automatically.
+2. **Convert existing images** — admin UI to batch-convert images already in the media library to WebP, with search & filter, lossless mode for PNGs, storage savings report, and individual or bulk conversion.
 3. **Migration tools** — admin UI to swap URL prefixes in the database and to batch-copy / batch-delete objects between S3 buckets.
 
 ## Requirements
@@ -81,7 +81,7 @@ This tab scans the media library for images that are not yet WebP (JPEG, PNG, GI
 ### What it does per file
 
 1. Downloads the original file from storage (HTTP fetch for S3 / CDN, filesystem read for local storage).
-2. Converts to lossy WebP using [sharp](https://sharp.pixelplumbing.com/).
+2. Converts to WebP using [sharp](https://sharp.pixelplumbing.com/) — lossy by default, lossless for PNGs when the option is enabled.
 3. Uploads the new `.webp` file through the configured Strapi upload provider.
 4. Updates the `plugin::upload.file` database record — `url`, `name`, `ext`, `mime`, `size`, and all format variant URLs (thumbnail, small, medium, large).
 5. Deletes the old file from storage.
@@ -110,13 +110,32 @@ Click **Convert All (N)** to convert every non-WebP image in one run.
 
 - A confirmation dialog is shown before anything starts.
 - An optional **quality override** slider lets you use a different quality for this run without changing the global setting.
+- Enable **Use lossless WebP for PNG files** to encode PNGs pixel-perfectly. Lossless WebP preserves every detail but produces larger files than lossy — use it when quality loss on transparency-heavy graphics is unacceptable.
 - Files are collected and then converted in batches of 10. A progress bar tracks completion.
+- A **storage savings report** is shown live during conversion and in the completion message — e.g. `Saved 14.2 MB · 38% smaller`.
 - Click **Stop** at any time to pause between batches. Click **Convert All** again to resume — files already converted are WebP and will not appear in the next run.
 - Up to 5 000 files are collected per run. For libraries larger than that, run Convert All multiple times.
+- When a **search or MIME filter** is active, Convert All converts only the filtered set. The confirmation dialog describes the active filter.
+
+### Search and filter
+
+The **Files to convert** card includes controls to narrow the list before converting:
+
+| Control | Behaviour |
+|---|---|
+| **Search by name** | Filters the list to files whose name contains the search term (case-insensitive, 400 ms debounce). Results update in place — the existing list fades while new results load. |
+| **File type dropdown** | Filters to a single MIME type — JPEG, PNG, GIF, BMP, TIFF, or HEIC. Applies immediately on change. |
+| **Clear filters** | Resets both filters and reloads the full list. Appears only when at least one filter is active. |
+
+Pagination respects the active filters — Next / Prev page through the filtered set only.
 
 ### Individual convert
 
 Each row in the file list has a **Convert** button. If conversion fails, the button changes to **Retry** and the error tooltip shows the reason.
+
+After a successful individual conversion, the row shows the before/after size and the percentage reduction — e.g. `148 KB → 122 KB (−18%)`.
+
+Individual conversion respects the **lossless PNG** checkbox in the bulk card.
 
 ### Provider compatibility
 
