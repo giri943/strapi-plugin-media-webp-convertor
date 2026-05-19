@@ -20,6 +20,11 @@ import {
   postS3CopyBatch,
   postS3DeleteBatch,
   postS3TestConnection,
+  getConversionStats,
+  getConversionFiles,
+  postConversionBatch,
+  type ConversionStats,
+  type ConversionFile,
 } from '../utils/pluginRequest';
 
 /* ------------------------------------------------------------------ */
@@ -1167,10 +1172,454 @@ const MigrationPanel = () => {
 };
 
 /* ------------------------------------------------------------------ */
+/*  Convert existing images tab                                         */
+/* ------------------------------------------------------------------ */
+
+type FileConvStatus = { status: 'converting' | 'done' | 'error'; error?: string };
+
+const BATCH_SIZE = 10;
+const LIST_PAGE_SIZE = 20;
+const ID_COLLECT_PAGE_SIZE = 50;
+const ID_COLLECT_LIMIT = 5000;
+
+const ConversionPanel = () => {
+  const [stats, setStats] = useState<ConversionStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+
+  const [files, setFiles] = useState<ConversionFile[]>([]);
+  const [filesPage, setFilesPage] = useState(1);
+  const [filesPageCount, setFilesPageCount] = useState(1);
+  const [filesTotal, setFilesTotal] = useState(0);
+  const [filesLoading, setFilesLoading] = useState(false);
+
+  const [useCustomQuality, setUseCustomQuality] = useState(false);
+  const [customQuality, setCustomQuality] = useState(82);
+  const [settingsQuality, setSettingsQuality] = useState(82);
+
+  const [fileStatuses, setFileStatuses] = useState<Map<number, FileConvStatus>>(new Map());
+
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const [bulkConverted, setBulkConverted] = useState(0);
+  const [bulkTotal, setBulkTotal] = useState(0);
+  const [bulkDone, setBulkDone] = useState(false);
+  const bulkStopRef = useRef(false);
+
+  const [msg, setMsg] = useState<string | null>(null);
+  const [msgVariant, setMsgVariant] = useState<'success' | 'danger' | 'warning'>('success');
+
+  const setFileStatus = (id: number, s: FileConvStatus) =>
+    setFileStatuses((prev) => new Map([...prev, [id, s]]));
+
+  const loadStats = useCallback(async () => {
+    setStatsLoading(true);
+    try {
+      setStats(await getConversionStats());
+    } catch {
+      // silent
+    } finally {
+      setStatsLoading(false);
+    }
+  }, []);
+
+  const loadFiles = useCallback(async (page: number) => {
+    setFilesLoading(true);
+    try {
+      const r = await getConversionFiles(page, LIST_PAGE_SIZE);
+      setFiles(r.files);
+      setFilesPageCount(r.pageCount);
+      setFilesTotal(r.total);
+    } catch {
+      // silent
+    } finally {
+      setFilesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadStats();
+    void loadFiles(1);
+    getSettings()
+      .then((s) => setSettingsQuality(s.webpQuality))
+      .catch(() => {});
+  }, [loadStats, loadFiles]);
+
+  const effectiveQuality = useCustomQuality ? customQuality : settingsQuality;
+
+  const convertSingle = async (file: ConversionFile) => {
+    setFileStatus(file.id, { status: 'converting' });
+    try {
+      const r = await postConversionBatch({ fileIds: [file.id], quality: effectiveQuality });
+      if (r.converted > 0) {
+        setFileStatus(file.id, { status: 'done' });
+        void loadStats();
+      } else {
+        const err = r.errors[0];
+        setFileStatus(file.id, { status: 'error', error: err?.error ?? 'No result' });
+      }
+    } catch (e) {
+      setFileStatus(file.id, { status: 'error', error: e instanceof Error ? e.message : 'Failed' });
+    }
+  };
+
+  const startBulkConvert = async () => {
+    const toConvert = stats?.needsConversion ?? 0;
+    if (toConvert === 0) {
+      setMsgVariant('success');
+      setMsg('All images are already in WebP format.');
+      return;
+    }
+    if (
+      !window.confirm(
+        `This will convert ${toConvert.toLocaleString()} non-WebP image${toConvert === 1 ? '' : 's'} to WebP and replace the original files in storage. Make sure you have a backup. Continue?`
+      )
+    )
+      return;
+
+    bulkStopRef.current = false;
+    setBulkRunning(true);
+    setBulkConverted(0);
+    setBulkDone(false);
+    setBulkTotal(toConvert);
+    setMsg(null);
+    setFileStatuses(new Map());
+
+    let localConverted = 0;
+
+    try {
+      // Collect all convertible IDs (up to ID_COLLECT_LIMIT)
+      const allIds: number[] = [];
+      let idPage = 1;
+      while (allIds.length < ID_COLLECT_LIMIT) {
+        const r = await getConversionFiles(idPage, ID_COLLECT_PAGE_SIZE);
+        for (const f of r.files) allIds.push(f.id);
+        if (idPage >= r.pageCount || r.files.length === 0) break;
+        idPage++;
+      }
+      setBulkTotal(allIds.length);
+
+      // Convert in batches
+      for (let i = 0; i < allIds.length; i += BATCH_SIZE) {
+        if (bulkStopRef.current) break;
+        const batch = allIds.slice(i, i + BATCH_SIZE);
+        const r = await postConversionBatch({ fileIds: batch, quality: effectiveQuality });
+        localConverted += r.converted;
+        setBulkConverted(localConverted);
+        for (const id of batch) {
+          const err = r.errors.find((e) => e.id === id);
+          setFileStatus(id, err ? { status: 'error', error: err.error } : { status: 'done' });
+        }
+      }
+
+      if (bulkStopRef.current) {
+        setMsgVariant('warning');
+        setMsg(`Stopped after converting ${localConverted.toLocaleString()} file(s). Run Convert All again to resume.`);
+      } else {
+        setBulkDone(true);
+        setMsgVariant('success');
+        setMsg(`Done — ${localConverted.toLocaleString()} file${localConverted === 1 ? '' : 's'} converted to WebP.`);
+      }
+      void loadStats();
+      void loadFiles(filesPage);
+    } catch (e) {
+      setMsgVariant('danger');
+      setMsg(e instanceof Error ? e.message : 'Bulk conversion failed');
+    } finally {
+      setBulkRunning(false);
+    }
+  };
+
+  const stopBulk = () => {
+    bulkStopRef.current = true;
+  };
+
+  const bulkProgressPct =
+    bulkTotal > 0 ? Math.min(100, Math.round((bulkConverted / bulkTotal) * 100)) : 0;
+
+  return (
+    <Flex direction="column" alignItems="stretch" gap={4}>
+
+      {/* Stats card */}
+      <Box background="neutral0" padding={6} hasRadius shadow="filterShadow">
+        <Flex direction="column" alignItems="stretch" gap={4}>
+          <Box>
+            <Typography variant="delta" tag="h2">Convert existing images</Typography>
+            <Box paddingTop={1}>
+              <Typography variant="omega" textColor="neutral600">
+                Scan the media library for non-WebP images and convert them in place. Each file is re-uploaded as WebP,
+                the database record is updated, and the old file is removed from storage. Content that references files
+                by relation (the standard Strapi media field) will automatically serve the new URL — no content edits needed.
+              </Typography>
+            </Box>
+          </Box>
+
+          <Divider />
+
+          {statsLoading ? (
+            <Typography variant="omega" textColor="neutral500">Loading stats…</Typography>
+          ) : stats ? (
+            <div style={gridRow}>
+              <Box padding={4} background="neutral100" hasRadius>
+                <Typography variant="sigma" textColor="neutral500">Total media files</Typography>
+                <Typography variant="alpha" tag="p">{stats.total.toLocaleString()}</Typography>
+              </Box>
+              <Box padding={4} background="neutral100" hasRadius>
+                <Typography variant="sigma" textColor="neutral500">Already WebP</Typography>
+                <Typography variant="alpha" tag="p" style={{ color: '#328048' }}>{stats.alreadyWebP.toLocaleString()}</Typography>
+              </Box>
+              <Box padding={4} background="neutral100" hasRadius>
+                <Typography variant="sigma" textColor="neutral500">Need conversion</Typography>
+                <Typography variant="alpha" tag="p" style={{ color: stats.needsConversion > 0 ? '#b34000' : '#328048' }}>
+                  {stats.needsConversion.toLocaleString()}
+                </Typography>
+              </Box>
+            </div>
+          ) : (
+            <Button variant="secondary" size="S" onClick={() => void loadStats()}>Load stats</Button>
+          )}
+        </Flex>
+      </Box>
+
+      {/* Bulk convert card */}
+      <Box background="neutral0" padding={6} hasRadius shadow="filterShadow">
+        <Flex direction="column" alignItems="stretch" gap={5}>
+          <Box>
+            <Typography variant="delta" tag="h2">Bulk convert</Typography>
+          </Box>
+
+          <Divider />
+
+          {/* Quality override */}
+          <Flex alignItems="center" gap={4}>
+            <Checkbox
+              checked={useCustomQuality}
+              onCheckedChange={(v: boolean | 'indeterminate') => setUseCustomQuality(v === true)}
+              disabled={bulkRunning}
+            >
+              Override quality for this run
+            </Checkbox>
+          </Flex>
+
+          {useCustomQuality && (
+            <Box style={{ maxWidth: 360 }}>
+              <Field.Root name="bulkQuality">
+                <Field.Label>Quality — {customQuality}</Field.Label>
+                <Box paddingTop={2}>
+                  <input
+                    type="range"
+                    min={1}
+                    max={100}
+                    step={1}
+                    value={customQuality}
+                    disabled={bulkRunning}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setCustomQuality(Number(e.target.value))}
+                    style={{ width: '100%', accentColor: '#4945ff', cursor: 'pointer' }}
+                  />
+                </Box>
+                <Box paddingTop={1}>
+                  <Typography variant="pi" textColor="neutral500">
+                    Leave override off to use the quality from Upload optimization settings ({settingsQuality}).
+                  </Typography>
+                </Box>
+              </Field.Root>
+            </Box>
+          )}
+
+          {/* Progress bar (shown during / after bulk run) */}
+          {(bulkRunning || bulkDone) && bulkTotal > 0 && (
+            <Box padding={4} background="neutral100" hasRadius borderColor="neutral150" borderStyle="solid" borderWidth="1px">
+              <Typography variant="omega" fontWeight="bold" textColor="neutral800">
+                {bulkConverted.toLocaleString()} / {bulkTotal.toLocaleString()} converted ({bulkProgressPct}%)
+              </Typography>
+              <Box paddingTop={2} width="100%">
+                <ProgressBar value={bulkProgressPct} max={100} />
+              </Box>
+            </Box>
+          )}
+
+          {msg && (
+            <Alert
+              title={msgVariant === 'success' ? 'Done' : msgVariant === 'warning' ? 'Stopped' : 'Error'}
+              variant={msgVariant}
+              closeLabel="Dismiss"
+              onClose={() => setMsg(null)}
+            >
+              {msg}
+            </Alert>
+          )}
+
+          <Flex gap={2} alignItems="center" wrap="wrap">
+            {bulkRunning ? (
+              <Button variant="danger" onClick={stopBulk}>Stop</Button>
+            ) : (
+              <Button
+                onClick={() => void startBulkConvert()}
+                disabled={!stats || stats.needsConversion === 0 || bulkRunning}
+              >
+                Convert All{stats ? ` (${stats.needsConversion.toLocaleString()})` : ''}
+              </Button>
+            )}
+            <Button
+              variant="secondary"
+              onClick={() => { void loadStats(); void loadFiles(filesPage); }}
+              disabled={bulkRunning || statsLoading}
+            >
+              Refresh
+            </Button>
+            {bulkRunning && (
+              <Typography variant="pi" textColor="neutral600">
+                Converting in batches of {BATCH_SIZE} — click Stop to pause.
+              </Typography>
+            )}
+          </Flex>
+        </Flex>
+      </Box>
+
+      {/* File list card */}
+      <Box background="neutral0" padding={6} hasRadius shadow="filterShadow">
+        <Flex direction="column" alignItems="stretch" gap={4}>
+          <Flex justifyContent="space-between" alignItems="center" wrap="wrap" gap={2}>
+            <Box>
+              <Typography variant="delta" tag="h2">Files to convert</Typography>
+              {!filesLoading && filesTotal > 0 && (
+                <Box paddingTop={1}>
+                  <Typography variant="pi" textColor="neutral500">
+                    {filesTotal.toLocaleString()} non-WebP image{filesTotal === 1 ? '' : 's'} · page {filesPage} of {filesPageCount}
+                  </Typography>
+                </Box>
+              )}
+            </Box>
+            <Flex gap={2}>
+              <Button
+                size="S"
+                variant="ghost"
+                disabled={filesPage <= 1 || filesLoading || bulkRunning}
+                onClick={() => { const p = filesPage - 1; setFilesPage(p); void loadFiles(p); }}
+              >
+                ← Prev
+              </Button>
+              <Button
+                size="S"
+                variant="ghost"
+                disabled={filesPage >= filesPageCount || filesLoading || bulkRunning}
+                onClick={() => { const p = filesPage + 1; setFilesPage(p); void loadFiles(p); }}
+              >
+                Next →
+              </Button>
+            </Flex>
+          </Flex>
+
+          <Divider />
+
+          {filesLoading ? (
+            <Typography variant="omega" textColor="neutral500">Loading…</Typography>
+          ) : files.length === 0 ? (
+            <Box padding={4} background="neutral100" hasRadius>
+              <Typography variant="omega" textColor="neutral600">
+                No non-WebP images found.
+                {stats && stats.needsConversion === 0 && ' All images are already WebP — nothing to convert.'}
+              </Typography>
+            </Box>
+          ) : (
+            <Flex direction="column" alignItems="stretch" gap={2}>
+              {files.map((file) => {
+                const fileStatus = fileStatuses.get(file.id);
+                const isConverting = fileStatus?.status === 'converting';
+                const isDone = fileStatus?.status === 'done';
+                const isError = fileStatus?.status === 'error';
+                const thumbUrl =
+                  (file.formats as any)?.thumbnail?.url ?? file.url;
+
+                return (
+                  <Box
+                    key={file.id}
+                    padding={3}
+                    background="neutral100"
+                    hasRadius
+                    borderColor={isDone ? 'success200' : isError ? 'danger200' : 'neutral200'}
+                    borderStyle="solid"
+                    borderWidth="1px"
+                  >
+                    <Flex alignItems="center" gap={3}>
+                      {/* Thumbnail */}
+                      <Box
+                        style={{
+                          width: 48,
+                          height: 48,
+                          borderRadius: 6,
+                          overflow: 'hidden',
+                          background: '#e0e0e0',
+                          flexShrink: 0,
+                        }}
+                      >
+                        <img
+                          src={thumbUrl}
+                          alt=""
+                          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).style.display = 'none';
+                          }}
+                        />
+                      </Box>
+
+                      {/* File info */}
+                      <Box flex={1} style={{ minWidth: 0 }}>
+                        <Typography
+                          variant="omega"
+                          fontWeight="bold"
+                          style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}
+                        >
+                          {file.name}
+                        </Typography>
+                        <Typography variant="pi" textColor="neutral500">
+                          {file.mime} &middot; {file.size.toFixed(1)} KB
+                        </Typography>
+                      </Box>
+
+                      {/* Status */}
+                      {isDone && (
+                        <Typography variant="pi" style={{ color: '#328048', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                          ✓ Converted
+                        </Typography>
+                      )}
+                      {isError && (
+                        <Typography
+                          variant="pi"
+                          style={{ color: '#c9553f', whiteSpace: 'nowrap' }}
+                          title={fileStatus?.error}
+                        >
+                          ✗ Error
+                        </Typography>
+                      )}
+
+                      {/* Action button */}
+                      {!isDone && (
+                        <Button
+                          size="S"
+                          variant={isError ? 'ghost' : 'secondary'}
+                          onClick={() => void convertSingle(file)}
+                          disabled={isConverting || bulkRunning}
+                          loading={isConverting}
+                        >
+                          {isError ? 'Retry' : 'Convert'}
+                        </Button>
+                      )}
+                    </Flex>
+                  </Box>
+                );
+              })}
+            </Flex>
+          )}
+        </Flex>
+      </Box>
+    </Flex>
+  );
+};
+
+/* ------------------------------------------------------------------ */
 /*  Page shell                                                          */
 /* ------------------------------------------------------------------ */
 
-type TabKey = 'optimization' | 'migration';
+type TabKey = 'optimization' | 'migration' | 'conversion';
 
 const HomePage = () => {
   const [tab, setTab] = useState<TabKey>('optimization');
@@ -1185,11 +1634,15 @@ const HomePage = () => {
         <Tabs.Root variant="simple" value={tab} onValueChange={(v: string) => setTab(v as TabKey)}>
           <Tabs.List aria-label="Plugin sections">
             <Tabs.Trigger value="optimization">Upload optimization</Tabs.Trigger>
+            <Tabs.Trigger value="conversion">Convert existing</Tabs.Trigger>
             <Tabs.Trigger value="migration">Migration</Tabs.Trigger>
           </Tabs.List>
           <Box paddingTop={6}>
             <Tabs.Content value="optimization">
               <UploadOptimizationPanel />
+            </Tabs.Content>
+            <Tabs.Content value="conversion">
+              <ConversionPanel />
             </Tabs.Content>
             <Tabs.Content value="migration">
               <MigrationPanel />
