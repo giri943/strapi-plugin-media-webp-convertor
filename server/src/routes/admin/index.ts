@@ -52,5 +52,23 @@ export default () => ({
       handler: 'migration.s3DeleteBatch',
       config: { policies: requireActions(PLUGIN_ACTIONS.migrationS3Delete) },
     },
+    {
+      method: 'GET' as const,
+      path: '/conversion/stats',
+      handler: 'conversion.stats',
+      config: { policies: requireActions(PLUGIN_ACTIONS.conversionList) },
+    },
+    {
+      method: 'GET' as const,
+      path: '/conversion/files',
+      handler: 'conversion.listFiles',
+      config: { policies: requireActions(PLUGIN_ACTIONS.conversionList) },
+    },
+    {
+      method: 'POST' as const,
+      path: '/conversion/convert-batch',
+      handler: 'conversion.convertBatch',
+      config: { policies: requireActions(PLUGIN_ACTIONS.conversionConvert) },
+    },
   ],
 });
