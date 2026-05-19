@@ -1,9 +1,10 @@
 # strapi-plugin-media-webp-convertor
 
-Strapi 5 plugin with two features:
+Strapi 5 plugin with three features:
 
 1. **Auto WebP conversion** — every raster image uploaded through the Strapi media library is converted to WebP on the fly (configurable quality, SVG passthrough with security checks).
-2. **Migration tools** — admin UI to swap URL prefixes in the database and to batch-copy / batch-delete objects between S3 buckets.
+2. **Convert existing images** — admin UI to batch-convert images already in the media library to WebP, replacing the original files in storage and updating the database records automatically.
+3. **Migration tools** — admin UI to swap URL prefixes in the database and to batch-copy / batch-delete objects between S3 buckets.
 
 ## Requirements
 
@@ -43,7 +44,7 @@ No changes to `config/middlewares.ts` are needed. The upload interceptor is regi
 
 Both values can also be changed at runtime from the admin panel under **Settings → Media WebP & migration** and are stored in the Strapi plugin store (not in `.env`). Runtime values override the config file defaults.
 
-## What gets converted
+## What gets converted (on upload)
 
 | File type | Behaviour |
 |---|---|
@@ -62,10 +63,71 @@ For other roles, go to **Settings → Users & Roles → Roles**, edit the role, 
 |---|---|
 | `settings.read` | View the quality / enabled settings |
 | `settings.update` | Save settings changes |
+| `conversion.list` | View the Convert existing tab and stats |
+| `conversion.convert` | Run individual or bulk WebP conversion on existing images |
 | `migration.preview` | Preview URL prefix matches before replacing |
 | `migration.replace` | Apply URL prefix replacements in the database |
 | `migration.s3-copy` | Run S3 batch copy |
 | `migration.s3-delete` | Run S3 batch delete |
+
+---
+
+## Convert existing images
+
+Access via **Settings → Media WebP & migration → Convert existing tab**.
+
+This tab scans the media library for images that are not yet WebP (JPEG, PNG, GIF, BMP, TIFF, HEIC/HEIF) and lets you convert them individually or all at once.
+
+### What it does per file
+
+1. Downloads the original file from storage (HTTP fetch for S3 / CDN, filesystem read for local storage).
+2. Converts to lossy WebP using [sharp](https://sharp.pixelplumbing.com/).
+3. Uploads the new `.webp` file through the configured Strapi upload provider.
+4. Updates the `plugin::upload.file` database record — `url`, `name`, `ext`, `mime`, `size`, and all format variant URLs (thumbnail, small, medium, large).
+5. Deletes the old file from storage.
+
+The database record is always updated **before** the old file is deleted, so a partial failure never leaves a broken record.
+
+### How content references are updated
+
+Strapi media fields store a **relation** (file ID), not a raw URL. When the `plugin::upload.file` record is updated, all content that references that file via a media relation field automatically serves the new WebP URL — no content edits are needed.
+
+> **Rich-text / WYSIWYG fields** that contain hard-coded image URLs (e.g. pasted URLs in a markdown body) are not updated automatically. Use the **URL migration** tab to rewrite those prefixes after conversion.
+
+### Stats card
+
+Shows the current breakdown of your media library:
+
+| Counter | Meaning |
+|---|---|
+| Total media files | All records in `plugin::upload.file` |
+| Already WebP | Files with `mime = image/webp` |
+| Need conversion | Files with a convertible MIME type (JPEG, PNG, GIF, BMP, TIFF, HEIC/HEIF) |
+
+### Bulk convert
+
+Click **Convert All (N)** to convert every non-WebP image in one run.
+
+- A confirmation dialog is shown before anything starts.
+- An optional **quality override** slider lets you use a different quality for this run without changing the global setting.
+- Files are collected and then converted in batches of 10. A progress bar tracks completion.
+- Click **Stop** at any time to pause between batches. Click **Convert All** again to resume — files already converted are WebP and will not appear in the next run.
+- Up to 5 000 files are collected per run. For libraries larger than that, run Convert All multiple times.
+
+### Individual convert
+
+Each row in the file list has a **Convert** button. If conversion fails, the button changes to **Retry** and the error tooltip shows the reason.
+
+### Provider compatibility
+
+| Storage provider | File download method |
+|---|---|
+| Local (`@strapi/provider-upload-local`) | Read directly from the filesystem |
+| AWS S3 / compatible (public bucket) | HTTP fetch from the file URL |
+| CloudFront / CDN in front of S3 | HTTP fetch from the CDN URL |
+| Private S3 bucket | ⚠ Not supported — the file URL must be publicly accessible |
+
+---
 
 ## Migration panel
 
@@ -73,7 +135,7 @@ Access via **Settings → Media WebP & migration → Migration tab**.
 
 ### URL prefix replacement
 
-Swaps the URL prefix stored in `plugin::upload.file` records (both the main `url` field and format thumbnail URLs). Use this after moving files to a new CDN or S3 bucket.
+Swaps the URL prefix stored in `plugin::upload.file` records (both the main `url` field and format thumbnail URLs). Use this after moving files to a new CDN or S3 bucket, or after bulk-converting existing images if any rich-text fields contain hard-coded URLs.
 
 1. Enter the **old prefix** (e.g. `https://old-bucket.s3.amazonaws.com`) and **new prefix** (e.g. `https://cdn.example.com`).
 2. Click **Preview** to see how many records match.
