@@ -1,54 +1,16 @@
 # strapi-plugin-media-webp-convertor
 
-Strapi **5.x** plugin: WebP normalization on upload (tunable quality), SVG checks, `fileInfo` name sync, and admin tools for **DB URL prefix replacement** plus **batched S3 copy** (ephemeral credentials only).
+Strapi 5 plugin with two features:
 
-## Install (local app)
+1. **Auto WebP conversion** — every raster image uploaded through the Strapi media library is converted to WebP on the fly (configurable quality, SVG passthrough with security checks).
+2. **Migration tools** — admin UI to swap URL prefixes in the database and to batch-copy / batch-delete objects between S3 buckets.
 
-```ts
-// config/plugins.ts
-'strapi-media-webp-convertor': {
-  enabled: true,
-  resolve: './src/plugins/@strapi-media-webp-convertor',
-  config: { webpQuality: 82, webpConversionEnabled: true },
-},
-```
+## Requirements
 
-Upload conversion is attached in the plugin **`bootstrap`** (`strapi.server.use`), so you do **not** need to list it in `config/middlewares.ts`. It still runs after the core body parser and before API routes.
+- Strapi **5.x**
+- Node **≥ 18**
 
-## Admin
-
-**Settings → Media WebP & migration** (or the menu label you configure).
-
-- **Upload optimization:** WebP quality (1–100) and enable/disable conversion (stored in plugin store, not `.env`).
-- **Migration:** Preview / apply URL prefix swaps on `plugin::upload.file`; S3 batch copy with **required** source settings (source AWS region, bucket, prefix field, source access key + secret) and **required** destination bucket; **destination AWS region** is optional (defaults to the source region for `CopyObject`). **Destination** access key + secret are **optional** (omit both to copy using source credentials). Run **Test connection** before **Run copy batch** is enabled — a successful test also **counts all source objects** under the prefix (paginated) and returns the total for the admin UI. Keys are sent per request only and are **not** persisted server-side.
-
-## Permissions
-
-Admin API routes use `admin::hasPermissions` on top of an authenticated session. **Super Admin** receives every registered action when the admin service runs `resetSuperAdminPermissions` at startup. **Other roles** must enable the **Media WebP & migration** entries under **Settings → Users & roles → Roles** (action ids: `plugin::strapi-media-webp-convertor.*`). Actions are registered in the plugin `register` phase.
-
-## Publish to npm
-
-The published tarball only includes `dist/` (see `"files"` in `package.json`). The `prepublishOnly` script runs `strapi-plugin build` automatically before `npm publish`.
-
-1. **Create an npm account** at [https://www.npmjs.com](https://www.npmjs.com) and log in locally: `npm login`.
-2. **Check the package name** is free: [https://www.npmjs.com/package/strapi-plugin-media-webp-convertor](https://www.npmjs.com/package/strapi-plugin-media-webp-convertor). If taken, change `"name"` in `package.json` (e.g. `@your-org/strapi-plugin-media-webp-convertor` for a scoped package).
-3. From **this plugin folder** (`src/plugins/@strapi-media-webp-convertor` or your extracted repo root for the plugin):
-
-   ```bash
-   yarn install
-   yarn build
-   npm publish --access public
-   ```
-
-   For a **scoped** name (`@org/...`), `--access public` is required on the free npm tier for public scoped packages.
-
-4. **Version bumps:** after each release, bump `"version"` in `package.json` (semver), then publish again.
-
-**Dry run / local install without publishing:** from the plugin folder run `npm pack`. That creates `strapi-plugin-media-webp-convertor-0.1.0.tgz`. In another app: `yarn add ./path/to/strapi-plugin-media-webp-convertor-0.1.0.tgz` (or `npm install ./...tgz`).
-
-**Develop against a local folder** (no pack): in the consumer app, `yarn add file:../relative/path/to/strapi-plugin-media-webp-convertor` (path must contain the plugin `package.json`).
-
-## Install from npm (consumer Strapi app)
+## Installation
 
 ```bash
 yarn add strapi-plugin-media-webp-convertor
@@ -56,20 +18,98 @@ yarn add strapi-plugin-media-webp-convertor
 npm install strapi-plugin-media-webp-convertor
 ```
 
-Then enable it **without** `resolve` (Strapi loads the plugin from `node_modules`):
+Enable the plugin in `config/plugins.ts`:
 
 ```ts
-// config/plugins.ts
-'strapi-media-webp-convertor': {
-  enabled: true,
-  config: { webpQuality: 82, webpConversionEnabled: true },
-},
+export default {
+  'strapi-media-webp-convertor': {
+    enabled: true,
+    config: {
+      webpQuality: 82,           // optional — see config reference below
+      webpConversionEnabled: true,
+    },
+  },
+};
 ```
 
-Keep **peer dependencies** satisfied in the host app (same major line as your Strapi version: `@strapi/strapi`, `react`, `react-dom`, `styled-components`, `@strapi/design-system`, `@strapi/icons`, etc.). The plugin also depends on `sharp` and `@aws-sdk/client-s3` transitively via its own `dependencies`; no extra host install is required for those unless you dedupe aggressively.
+No changes to `config/middlewares.ts` are needed. The upload interceptor is registered automatically during the plugin bootstrap phase.
 
-**Private registry:** configure `.npmrc` in the consumer (or CI) with your registry URL and token, then `yarn add strapi-plugin-media-webp-convertor` as usual.
+## Config reference
 
-## MIT
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `webpQuality` | `number` (1–100) | `82` | WebP encoding quality passed to [sharp](https://sharp.pixelplumbing.com/). Higher = better quality, larger file. |
+| `webpConversionEnabled` | `boolean` | `true` | Master switch. When `false`, uploads are passed through unchanged. |
 
-See `package.json`.
+Both values can also be changed at runtime from the admin panel under **Settings → Media WebP & migration** and are stored in the Strapi plugin store (not in `.env`). Runtime values override the config file defaults.
+
+## What gets converted
+
+| File type | Behaviour |
+|---|---|
+| JPEG, PNG, GIF, BMP, TIFF, HEIC/HEIF | Converted to WebP, filename updated to `.webp` |
+| WebP | Validated (magic bytes check), passed through unchanged |
+| SVG | Security-checked for scripts / event handlers / iframes, passed through unchanged |
+| Everything else | Passed through unchanged |
+
+## Permissions
+
+**Super Admin** automatically receives all plugin actions.
+
+For other roles, go to **Settings → Users & Roles → Roles**, edit the role, and enable the relevant entries under **Media WebP & migration**:
+
+| Action | What it unlocks |
+|---|---|
+| `settings.read` | View the quality / enabled settings |
+| `settings.update` | Save settings changes |
+| `migration.preview` | Preview URL prefix matches before replacing |
+| `migration.replace` | Apply URL prefix replacements in the database |
+| `migration.s3-copy` | Run S3 batch copy |
+| `migration.s3-delete` | Run S3 batch delete |
+
+## Migration panel
+
+Access via **Settings → Media WebP & migration → Migration tab**.
+
+### URL prefix replacement
+
+Swaps the URL prefix stored in `plugin::upload.file` records (both the main `url` field and format thumbnail URLs). Use this after moving files to a new CDN or S3 bucket.
+
+1. Enter the **old prefix** (e.g. `https://old-bucket.s3.amazonaws.com`) and **new prefix** (e.g. `https://cdn.example.com`).
+2. Click **Preview** to see how many records match.
+3. Click **Apply** to perform the replacement.
+
+### S3 batch copy
+
+Copies all objects under a source prefix to a destination bucket, in pages of 100 objects.
+
+**Required source fields:** AWS region, bucket, key prefix, access key ID, secret access key.
+
+**Required destination fields:** bucket name.
+
+**Optional destination fields:** region (defaults to source region), access key ID + secret (omit both to reuse source credentials — useful for same-account copies).
+
+Credentials are sent per-request only and are never persisted server-side.
+
+Click **Test connection** first — this validates all four required IAM permissions and counts the objects under the prefix. The copy button is only enabled after a successful test.
+
+#### Required IAM permissions
+
+| Permission | Why |
+|---|---|
+| `s3:ListBucket` on source | List objects to copy |
+| `s3:GetObject` on source | Read each object |
+| `s3:ListBucket` on destination | Verify destination access |
+| `s3:PutObject` on destination | Write each object |
+
+Cross-account copies buffer each object through the server (GetObject → PutObject). Same-account copies use `CopyObject` directly.
+
+### S3 batch delete
+
+Deletes all objects under a given prefix in batches. A confirmation dialog is shown before any deletion starts.
+
+Uses the same credential fields as the copy destination. You can pre-fill them from the copy destination with the **Pre-fill from copy destination** toggle.
+
+## License
+
+MIT

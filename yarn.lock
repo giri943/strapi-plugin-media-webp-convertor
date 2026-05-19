@@ -4350,7 +4350,7 @@
     yup "0.32.9"
     zod "3.25.67"
 
-"@strapi/utils@5.42.1":
+"@strapi/utils@5.42.1", "@strapi/utils@^5.33.0":
   version "5.42.1"
   resolved "https://registry.yarnpkg.com/@strapi/utils/-/utils-5.42.1.tgz#690dd43aae12fda20994e2df649eae82697c4800"
   integrity sha512-8B55UXo+vCkFVLVUrhlkqb/LpaYHdc2hzzlJHxxH9mza0eh5alzNo4ubfv3PbGCz2oUg+4YW22j2e+2wJlDMfQ==
