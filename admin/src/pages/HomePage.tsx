@@ -1175,7 +1175,22 @@ const MigrationPanel = () => {
 /*  Convert existing images tab                                         */
 /* ------------------------------------------------------------------ */
 
-type FileConvStatus = { status: 'converting' | 'done' | 'error'; error?: string };
+type FileConvStatus = {
+  status: 'converting' | 'done' | 'error';
+  error?: string;
+  originalKB?: number;
+  newKB?: number;
+};
+
+function formatSize(kb: number): string {
+  return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.round(kb)} KB`;
+}
+
+function savingsSummary(savedKB: number, originalKB: number): string {
+  if (originalKB <= 0 || savedKB <= 0) return '';
+  const pct = Math.round((savedKB / originalKB) * 100);
+  return `Saved ${formatSize(savedKB)} · ${pct}% smaller`;
+}
 
 const BATCH_SIZE = 10;
 const LIST_PAGE_SIZE = 20;
@@ -1191,10 +1206,13 @@ const ConversionPanel = () => {
   const [filesPageCount, setFilesPageCount] = useState(1);
   const [filesTotal, setFilesTotal] = useState(0);
   const [filesLoading, setFilesLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [mimeFilter, setMimeFilter] = useState('');
 
   const [useCustomQuality, setUseCustomQuality] = useState(false);
   const [customQuality, setCustomQuality] = useState(82);
   const [settingsQuality, setSettingsQuality] = useState(82);
+  const [losslessForPng, setLosslessForPng] = useState(false);
 
   const [fileStatuses, setFileStatuses] = useState<Map<number, FileConvStatus>>(new Map());
 
@@ -1202,7 +1220,10 @@ const ConversionPanel = () => {
   const [bulkConverted, setBulkConverted] = useState(0);
   const [bulkTotal, setBulkTotal] = useState(0);
   const [bulkDone, setBulkDone] = useState(false);
+  const [bulkSavedKB, setBulkSavedKB] = useState(0);
+  const [bulkOriginalKB, setBulkOriginalKB] = useState(0);
   const bulkStopRef = useRef(false);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [msg, setMsg] = useState<string | null>(null);
   const [msgVariant, setMsgVariant] = useState<'success' | 'danger' | 'warning'>('success');
@@ -1221,10 +1242,10 @@ const ConversionPanel = () => {
     }
   }, []);
 
-  const loadFiles = useCallback(async (page: number) => {
+  const loadFiles = useCallback(async (page: number, search?: string, mime?: string) => {
     setFilesLoading(true);
     try {
-      const r = await getConversionFiles(page, LIST_PAGE_SIZE);
+      const r = await getConversionFiles(page, LIST_PAGE_SIZE, search, mime);
       setFiles(r.files);
       setFilesPageCount(r.pageCount);
       setFilesTotal(r.total);
@@ -1234,6 +1255,30 @@ const ConversionPanel = () => {
       setFilesLoading(false);
     }
   }, []);
+
+  const handleSearchChange = (value: string) => {
+    setSearchQuery(value);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => {
+      setFilesPage(1);
+      void loadFiles(1, value, mimeFilter);
+    }, 400);
+  };
+
+  const handleMimeChange = (value: string) => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    setMimeFilter(value);
+    setFilesPage(1);
+    void loadFiles(1, searchQuery, value);
+  };
+
+  const clearFilters = () => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    setSearchQuery('');
+    setMimeFilter('');
+    setFilesPage(1);
+    void loadFiles(1, '', '');
+  };
 
   useEffect(() => {
     void loadStats();
@@ -1248,9 +1293,10 @@ const ConversionPanel = () => {
   const convertSingle = async (file: ConversionFile) => {
     setFileStatus(file.id, { status: 'converting' });
     try {
-      const r = await postConversionBatch({ fileIds: [file.id], quality: effectiveQuality });
+      const losslessMimes = losslessForPng ? ['image/png'] : [];
+      const r = await postConversionBatch({ fileIds: [file.id], quality: effectiveQuality, losslessMimes });
       if (r.converted > 0) {
-        setFileStatus(file.id, { status: 'done' });
+        setFileStatus(file.id, { status: 'done', originalKB: file.size, newKB: r.newKB });
         void loadStats();
       } else {
         const err = r.errors[0];
@@ -1262,15 +1308,17 @@ const ConversionPanel = () => {
   };
 
   const startBulkConvert = async () => {
-    const toConvert = stats?.needsConversion ?? 0;
+    const toConvert = filesTotal;
     if (toConvert === 0) {
       setMsgVariant('success');
-      setMsg('All images are already in WebP format.');
+      setMsg(searchQuery || mimeFilter ? 'No files match the current filters.' : 'All images are already in WebP format.');
       return;
     }
+    const filterDesc = [searchQuery && `name contains "${searchQuery}"`, mimeFilter && `type: ${mimeFilter}`]
+      .filter(Boolean).join(', ');
     if (
       !window.confirm(
-        `This will convert ${toConvert.toLocaleString()} non-WebP image${toConvert === 1 ? '' : 's'} to WebP and replace the original files in storage. Make sure you have a backup. Continue?`
+        `This will convert ${toConvert.toLocaleString()} non-WebP image${toConvert === 1 ? '' : 's'}${filterDesc ? ` (${filterDesc})` : ''} to WebP and replace the original files in storage. Make sure you have a backup. Continue?`
       )
     )
       return;
@@ -1279,31 +1327,41 @@ const ConversionPanel = () => {
     setBulkRunning(true);
     setBulkConverted(0);
     setBulkDone(false);
+    setBulkSavedKB(0);
+    setBulkOriginalKB(0);
     setBulkTotal(toConvert);
     setMsg(null);
     setFileStatuses(new Map());
 
     let localConverted = 0;
+    let localSavedKB = 0;
+    let localOriginalKB = 0;
 
     try {
       // Collect all convertible IDs (up to ID_COLLECT_LIMIT)
       const allIds: number[] = [];
       let idPage = 1;
       while (allIds.length < ID_COLLECT_LIMIT) {
-        const r = await getConversionFiles(idPage, ID_COLLECT_PAGE_SIZE);
+        const r = await getConversionFiles(idPage, ID_COLLECT_PAGE_SIZE, searchQuery || undefined, mimeFilter || undefined);
         for (const f of r.files) allIds.push(f.id);
         if (idPage >= r.pageCount || r.files.length === 0) break;
         idPage++;
       }
       setBulkTotal(allIds.length);
 
+      const losslessMimes = losslessForPng ? ['image/png'] : [];
+
       // Convert in batches
       for (let i = 0; i < allIds.length; i += BATCH_SIZE) {
         if (bulkStopRef.current) break;
         const batch = allIds.slice(i, i + BATCH_SIZE);
-        const r = await postConversionBatch({ fileIds: batch, quality: effectiveQuality });
+        const r = await postConversionBatch({ fileIds: batch, quality: effectiveQuality, losslessMimes });
         localConverted += r.converted;
+        localSavedKB += r.savedKB;
+        localOriginalKB += r.originalKB;
         setBulkConverted(localConverted);
+        setBulkSavedKB(localSavedKB);
+        setBulkOriginalKB(localOriginalKB);
         for (const id of batch) {
           const err = r.errors.find((e) => e.id === id);
           setFileStatus(id, err ? { status: 'error', error: err.error } : { status: 'done' });
@@ -1312,14 +1370,16 @@ const ConversionPanel = () => {
 
       if (bulkStopRef.current) {
         setMsgVariant('warning');
-        setMsg(`Stopped after converting ${localConverted.toLocaleString()} file(s). Run Convert All again to resume.`);
+        const savings = savingsSummary(localSavedKB, localOriginalKB);
+        setMsg(`Stopped after converting ${localConverted.toLocaleString()} file(s).${savings ? ` ${savings}.` : ''} Run Convert All again to resume.`);
       } else {
         setBulkDone(true);
         setMsgVariant('success');
-        setMsg(`Done — ${localConverted.toLocaleString()} file${localConverted === 1 ? '' : 's'} converted to WebP.`);
+        const savings = savingsSummary(localSavedKB, localOriginalKB);
+        setMsg(`Done — ${localConverted.toLocaleString()} file${localConverted === 1 ? '' : 's'} converted to WebP.${savings ? ` ${savings}.` : ''}`);
       }
       void loadStats();
-      void loadFiles(filesPage);
+      void loadFiles(filesPage, searchQuery, mimeFilter);
     } catch (e) {
       setMsgVariant('danger');
       setMsg(e instanceof Error ? e.message : 'Bulk conversion failed');
@@ -1388,14 +1448,21 @@ const ConversionPanel = () => {
 
           <Divider />
 
-          {/* Quality override */}
-          <Flex alignItems="center" gap={4}>
+          {/* Quality + lossless options */}
+          <Flex direction="column" alignItems="stretch" gap={3}>
             <Checkbox
               checked={useCustomQuality}
               onCheckedChange={(v: boolean | 'indeterminate') => setUseCustomQuality(v === true)}
               disabled={bulkRunning}
             >
               Override quality for this run
+            </Checkbox>
+            <Checkbox
+              checked={losslessForPng}
+              onCheckedChange={(v: boolean | 'indeterminate') => setLosslessForPng(v === true)}
+              disabled={bulkRunning}
+            >
+              Use lossless WebP for PNG files (pixel-perfect, larger file size)
             </Checkbox>
           </Flex>
 
@@ -1427,9 +1494,16 @@ const ConversionPanel = () => {
           {/* Progress bar (shown during / after bulk run) */}
           {(bulkRunning || bulkDone) && bulkTotal > 0 && (
             <Box padding={4} background="neutral100" hasRadius borderColor="neutral150" borderStyle="solid" borderWidth="1px">
-              <Typography variant="omega" fontWeight="bold" textColor="neutral800">
-                {bulkConverted.toLocaleString()} / {bulkTotal.toLocaleString()} converted ({bulkProgressPct}%)
-              </Typography>
+              <Flex justifyContent="space-between" alignItems="baseline" wrap="wrap" gap={2}>
+                <Typography variant="omega" fontWeight="bold" textColor="neutral800">
+                  {bulkConverted.toLocaleString()} / {bulkTotal.toLocaleString()} converted ({bulkProgressPct}%)
+                </Typography>
+                {bulkSavedKB > 0 && (
+                  <Typography variant="pi" style={{ color: '#328048', fontWeight: 600 }}>
+                    {savingsSummary(bulkSavedKB, bulkOriginalKB)}
+                  </Typography>
+                )}
+              </Flex>
               <Box paddingTop={2} width="100%">
                 <ProgressBar value={bulkProgressPct} max={100} />
               </Box>
@@ -1453,14 +1527,14 @@ const ConversionPanel = () => {
             ) : (
               <Button
                 onClick={() => void startBulkConvert()}
-                disabled={!stats || stats.needsConversion === 0 || bulkRunning}
+                disabled={filesTotal === 0 || bulkRunning || filesLoading}
               >
-                Convert All{stats ? ` (${stats.needsConversion.toLocaleString()})` : ''}
+                Convert All ({filesTotal.toLocaleString()})
               </Button>
             )}
             <Button
               variant="secondary"
-              onClick={() => { void loadStats(); void loadFiles(filesPage); }}
+              onClick={() => { void loadStats(); void loadFiles(filesPage, searchQuery, mimeFilter); }}
               disabled={bulkRunning || statsLoading}
             >
               Refresh
@@ -1480,10 +1554,12 @@ const ConversionPanel = () => {
           <Flex justifyContent="space-between" alignItems="center" wrap="wrap" gap={2}>
             <Box>
               <Typography variant="delta" tag="h2">Files to convert</Typography>
-              {!filesLoading && filesTotal > 0 && (
+              {!filesLoading && (
                 <Box paddingTop={1}>
                   <Typography variant="pi" textColor="neutral500">
-                    {filesTotal.toLocaleString()} non-WebP image{filesTotal === 1 ? '' : 's'} · page {filesPage} of {filesPageCount}
+                    {filesTotal > 0
+                      ? `${filesTotal.toLocaleString()} non-WebP image${filesTotal === 1 ? '' : 's'}${searchQuery || mimeFilter ? ' (filtered)' : ''} · page ${filesPage} of ${filesPageCount}`
+                      : (searchQuery || mimeFilter ? 'No files match the current filters.' : 'No non-WebP images found.')}
                   </Typography>
                 </Box>
               )}
@@ -1493,7 +1569,7 @@ const ConversionPanel = () => {
                 size="S"
                 variant="ghost"
                 disabled={filesPage <= 1 || filesLoading || bulkRunning}
-                onClick={() => { const p = filesPage - 1; setFilesPage(p); void loadFiles(p); }}
+                onClick={() => { const p = filesPage - 1; setFilesPage(p); void loadFiles(p, searchQuery, mimeFilter); }}
               >
                 ← Prev
               </Button>
@@ -1501,25 +1577,68 @@ const ConversionPanel = () => {
                 size="S"
                 variant="ghost"
                 disabled={filesPage >= filesPageCount || filesLoading || bulkRunning}
-                onClick={() => { const p = filesPage + 1; setFilesPage(p); void loadFiles(p); }}
+                onClick={() => { const p = filesPage + 1; setFilesPage(p); void loadFiles(p, searchQuery, mimeFilter); }}
               >
                 Next →
               </Button>
             </Flex>
           </Flex>
 
+          {/* Filter row */}
+          <Flex gap={3} alignItems="flex-end" wrap="wrap">
+            <Box style={{ flex: '1 1 200px', minWidth: 150 }}>
+              <Field.Root name="fileSearch">
+                <Field.Label>Search by name</Field.Label>
+                <Field.Input
+                  value={searchQuery}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => handleSearchChange(e.target.value)}
+                  placeholder="e.g. photo, banner…"
+                  disabled={bulkRunning}
+                />
+              </Field.Root>
+            </Box>
+            <Box>
+              <Field.Root name="mimeFilter">
+                <Field.Label>File type</Field.Label>
+                <Box paddingTop={1}>
+                  <select
+                    value={mimeFilter}
+                    onChange={(e: ChangeEvent<HTMLSelectElement>) => handleMimeChange(e.target.value)}
+                    disabled={bulkRunning}
+                    style={{ height: 40, paddingLeft: 12, paddingRight: 12, border: '1px solid #dcdce4', borderRadius: 4, fontSize: 14, background: '#fff', cursor: 'pointer' }}
+                  >
+                    <option value="">All types</option>
+                    <option value="image/jpeg">JPEG</option>
+                    <option value="image/png">PNG</option>
+                    <option value="image/gif">GIF</option>
+                    <option value="image/bmp">BMP</option>
+                    <option value="image/tiff">TIFF</option>
+                    <option value="image/heic">HEIC</option>
+                  </select>
+                </Box>
+              </Field.Root>
+            </Box>
+            {(searchQuery || mimeFilter) && (
+              <Button size="S" variant="ghost" onClick={clearFilters} disabled={bulkRunning}>
+                Clear filters
+              </Button>
+            )}
+          </Flex>
+
           <Divider />
 
-          {filesLoading ? (
+          {files.length === 0 && filesLoading ? (
             <Typography variant="omega" textColor="neutral500">Loading…</Typography>
           ) : files.length === 0 ? (
             <Box padding={4} background="neutral100" hasRadius>
               <Typography variant="omega" textColor="neutral600">
-                No non-WebP images found.
-                {stats && stats.needsConversion === 0 && ' All images are already WebP — nothing to convert.'}
+                {searchQuery || mimeFilter
+                  ? 'No files match the current filters.'
+                  : 'No non-WebP images found.'}
               </Typography>
             </Box>
           ) : (
+            <div style={{ opacity: filesLoading ? 0.45 : 1, transition: 'opacity 0.15s ease', pointerEvents: filesLoading ? 'none' : 'auto' }}>
             <Flex direction="column" alignItems="stretch" gap={2}>
               {files.map((file) => {
                 const fileStatus = fileStatuses.get(file.id);
@@ -1577,9 +1696,19 @@ const ConversionPanel = () => {
 
                       {/* Status */}
                       {isDone && (
-                        <Typography variant="pi" style={{ color: '#328048', fontWeight: 600, whiteSpace: 'nowrap' }}>
-                          ✓ Converted
-                        </Typography>
+                        <Flex direction="column" alignItems="flex-end" gap={0} style={{ whiteSpace: 'nowrap' }}>
+                          <Typography variant="pi" style={{ color: '#328048', fontWeight: 600 }}>
+                            ✓ Converted
+                          </Typography>
+                          {fileStatus?.originalKB != null && fileStatus?.newKB != null && (
+                            <Typography variant="pi" textColor="neutral500">
+                              {formatSize(fileStatus.originalKB)} → {formatSize(fileStatus.newKB)}
+                              {fileStatus.originalKB > 0
+                                ? ` (−${Math.round(((fileStatus.originalKB - fileStatus.newKB) / fileStatus.originalKB) * 100)}%)`
+                                : ''}
+                            </Typography>
+                          )}
+                        </Flex>
                       )}
                       {isError && (
                         <Typography
@@ -1608,6 +1737,7 @@ const ConversionPanel = () => {
                 );
               })}
             </Flex>
+            </div>
           )}
         </Flex>
       </Box>

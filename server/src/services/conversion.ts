@@ -27,8 +27,9 @@ async function downloadBuffer(url: string, publicDir: string): Promise<Buffer> {
   return fs.promises.readFile(path.join(publicDir, rel));
 }
 
-async function toWebPBuffer(buffer: Buffer, quality: number): Promise<Buffer> {
-  return sharp(buffer, { failOn: 'error' }).rotate().webp({ quality }).toBuffer();
+async function toWebPBuffer(buffer: Buffer, quality: number, lossless = false): Promise<Buffer> {
+  const pipeline = sharp(buffer, { failOn: 'error' }).rotate();
+  return lossless ? pipeline.webp({ lossless: true }).toBuffer() : pipeline.webp({ quality }).toBuffer();
 }
 
 function swapToWebpName(name: string): string {
@@ -61,10 +62,15 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
       };
     },
 
-    async listConvertibleFiles(page: number, pageSize: number) {
+    async listConvertibleFiles(page: number, pageSize: number, search?: string, mimeFilter?: string) {
+      const where: Record<string, unknown> = mimeFilter && CONVERTIBLE_MIMES.has(mimeFilter)
+        ? { mime: mimeFilter }
+        : { mime: { $in: [...CONVERTIBLE_MIMES] } };
+      if (search?.trim()) where.name = { $containsi: search.trim() };
+
       const result = await db().findPage({
         select: ['id', 'name', 'url', 'mime', 'size', 'ext', 'hash', 'formats'],
-        where: { mime: { $in: [...CONVERTIBLE_MIMES] } },
+        where,
         orderBy: { id: 'asc' },
         page,
         pageSize,
@@ -79,9 +85,10 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
       };
     },
 
-    async convertBatch(fileIds: number[], quality: number) {
+    async convertBatch(fileIds: number[], quality: number, losslessMimes: string[] = []) {
       const provider = getProvider();
       const publicDir = getPublicDir();
+      const losslessSet = new Set(losslessMimes);
 
       const records: Array<{
         id: number;
@@ -100,6 +107,8 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
       let converted = 0;
       let failed = 0;
       const errors: { id: number; name: string; error: string }[] = [];
+      let totalOriginalKB = 0;
+      let totalNewKB = 0;
 
       for (const record of records) {
         if (!CONVERTIBLE_MIMES.has(record.mime)) continue;
@@ -107,14 +116,17 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
         try {
           // Download and convert main file
           const origBuf = await downloadBuffer(record.url, publicDir);
-          const webpBuf = await toWebPBuffer(origBuf, quality);
+          const isLossless = losslessSet.has(record.mime);
+          const webpBuf = await toWebPBuffer(origBuf, quality, isLossless);
+
+          const newSizeKB = Math.round((webpBuf.length / 1024) * 100) / 100;
 
           const newMainFile: any = {
             name: swapToWebpName(record.name),
             hash: record.hash,
             ext: '.webp',
             mime: 'image/webp',
-            size: Math.round((webpBuf.length / 1024) * 100) / 100,
+            size: newSizeKB,
             buffer: webpBuf,
           };
           await provider.upload(newMainFile);
@@ -131,7 +143,7 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
               const fmt = fmtVal as any;
               try {
                 const fmtBuf = await downloadBuffer(fmt.url, publicDir);
-                const fmtWebp = await toWebPBuffer(fmtBuf, quality);
+                const fmtWebp = await toWebPBuffer(fmtBuf, quality, isLossless);
                 const newFmtFile: any = {
                   name: swapToWebpName(fmt.name),
                   hash: fmt.hash,
@@ -177,6 +189,8 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
             await provider.delete({ url: record.url, hash: record.hash, ext: record.ext, name: record.name });
           } catch {}
 
+          totalOriginalKB += record.size;
+          totalNewKB += newSizeKB;
           converted++;
         } catch (err) {
           failed++;
@@ -188,7 +202,14 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
         }
       }
 
-      return { converted, failed, errors };
+      return {
+        converted,
+        failed,
+        errors,
+        originalKB: totalOriginalKB,
+        newKB: totalNewKB,
+        savedKB: totalOriginalKB - totalNewKB,
+      };
     },
   };
 };
