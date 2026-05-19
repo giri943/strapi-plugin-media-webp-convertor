@@ -15,8 +15,10 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
   async listFiles(ctx: any) {
     const page = Math.max(1, parseInt((ctx.query.page as string) || '1', 10));
     const pageSize = Math.min(100, Math.max(1, parseInt((ctx.query.pageSize as string) || '20', 10)));
+    const search = typeof ctx.query.search === 'string' ? ctx.query.search : undefined;
+    const mime = typeof ctx.query.mime === 'string' ? ctx.query.mime : undefined;
     try {
-      const result = await strapi.plugin(PLUGIN_NAME).service('conversion').listConvertibleFiles(page, pageSize);
+      const result = await strapi.plugin(PLUGIN_NAME).service('conversion').listConvertibleFiles(page, pageSize, search, mime);
       ctx.body = { data: result };
     } catch (e) {
       ctx.status = 500;
@@ -25,7 +27,7 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
   },
 
   async convertBatch(ctx: any) {
-    const { fileIds, quality } = ctx.request.body as { fileIds?: unknown; quality?: unknown };
+    const { fileIds, quality, losslessMimes } = ctx.request.body as { fileIds?: unknown; quality?: unknown; losslessMimes?: unknown };
 
     if (!Array.isArray(fileIds) || fileIds.length === 0) {
       ctx.status = 400;
@@ -56,7 +58,10 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
     }
 
     try {
-      const result = await strapi.plugin(PLUGIN_NAME).service('conversion').convertBatch(ids, webpQuality);
+      const safeLosslessMimes = Array.isArray(losslessMimes)
+        ? losslessMimes.filter((m): m is string => typeof m === 'string')
+        : [];
+      const result = await strapi.plugin(PLUGIN_NAME).service('conversion').convertBatch(ids, webpQuality, safeLosslessMimes);
       ctx.body = { data: result };
     } catch (e) {
       ctx.status = 500;

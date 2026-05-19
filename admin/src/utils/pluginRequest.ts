@@ -192,10 +192,13 @@ export async function getConversionStats(): Promise<ConversionStats> {
   }
 }
 
-export async function getConversionFiles(page: number, pageSize: number): Promise<ConversionFileList> {
+export async function getConversionFiles(page: number, pageSize: number, search?: string, mime?: string): Promise<ConversionFileList> {
   const { get } = getFetchClient();
   try {
-    const { data } = await get(`${basePath()}/conversion/files?page=${page}&pageSize=${pageSize}`);
+    const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+    if (search?.trim()) params.set('search', search.trim());
+    if (mime) params.set('mime', mime);
+    const { data } = await get(`${basePath()}/conversion/files?${params.toString()}`);
     const body = data as { data?: ConversionFileList };
     if (!body?.data) throw new Error('Invalid file list response');
     return body.data;
@@ -207,6 +210,7 @@ export async function getConversionFiles(page: number, pageSize: number): Promis
 export async function postConversionBatch(payload: {
   fileIds: number[];
   quality: number;
+  losslessMimes?: string[];
 }): Promise<ConversionBatchResult> {
   const { post } = getFetchClient();
   try {
