@@ -138,3 +138,77 @@ export async function postS3DeleteBatch(payload: Record<string, unknown>) {
     throw new Error(unwrapError(e));
   }
 }
+
+/* ------------------------------------------------------------------ */
+/*  Conversion API                                                      */
+/* ------------------------------------------------------------------ */
+
+export type ConversionStats = {
+  total: number;
+  alreadyWebP: number;
+  needsConversion: number;
+};
+
+export type ConversionFile = {
+  id: number;
+  name: string;
+  url: string;
+  mime: string;
+  size: number;
+  ext: string;
+  hash: string;
+  formats?: Record<string, { url: string; [key: string]: unknown }> | null;
+};
+
+export type ConversionFileList = {
+  files: ConversionFile[];
+  total: number;
+  page: number;
+  pageSize: number;
+  pageCount: number;
+};
+
+export type ConversionBatchResult = {
+  converted: number;
+  failed: number;
+  errors: { id: number; name: string; error: string }[];
+};
+
+export async function getConversionStats(): Promise<ConversionStats> {
+  const { get } = getFetchClient();
+  try {
+    const { data } = await get(`${basePath()}/conversion/stats`);
+    const body = data as { data?: ConversionStats };
+    if (!body?.data) throw new Error('Invalid stats response');
+    return body.data;
+  } catch (e) {
+    throw new Error(unwrapError(e));
+  }
+}
+
+export async function getConversionFiles(page: number, pageSize: number): Promise<ConversionFileList> {
+  const { get } = getFetchClient();
+  try {
+    const { data } = await get(`${basePath()}/conversion/files?page=${page}&pageSize=${pageSize}`);
+    const body = data as { data?: ConversionFileList };
+    if (!body?.data) throw new Error('Invalid file list response');
+    return body.data;
+  } catch (e) {
+    throw new Error(unwrapError(e));
+  }
+}
+
+export async function postConversionBatch(payload: {
+  fileIds: number[];
+  quality: number;
+}): Promise<ConversionBatchResult> {
+  const { post } = getFetchClient();
+  try {
+    const { data } = await post(`${basePath()}/conversion/convert-batch`, payload);
+    const body = data as { data?: ConversionBatchResult };
+    if (!body?.data) throw new Error('Invalid conversion response');
+    return body.data;
+  } catch (e) {
+    throw new Error(unwrapError(e));
+  }
+}
