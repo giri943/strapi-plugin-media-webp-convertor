@@ -1,6 +1,16 @@
 {
   "version": "0.4.0",
-  "keywords": ["strapi", "strapi5", "strapi-plugin", "webp", "upload", "media", "s3"],
+  "keywords": [
+    "strapi",
+    "strapi5",
+    "strapi-plugin",
+    "webp",
+    "upload",
+    "media",
+    "s3",
+    "migration",
+    "optimization"
+  ],
   "type": "commonjs",
   "engines": {
     "node": ">=18.0.0"
@@ -22,7 +32,11 @@
       "default": "./dist/server/index.js"
     }
   },
-  "files": ["dist", "LICENSE", "README.md"],
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "strapi-plugin build",
     "prepublishOnly": "strapi-plugin build",
@@ -76,7 +90,7 @@
   "author": "girish-soman",
   "repository": {
     "type": "git",
-    "url": "https://github.com/giri943/strapi-plugin-media-webp-convertor.git"
+    "url": "git+https://github.com/giri943/strapi-plugin-media-webp-convertor.git"
   },
   "bugs": {
     "url": "https://github.com/giri943/strapi-plugin-media-webp-convertor/issues"
