@@ -1,5 +1,5 @@
 {
-  "version": "0.3.1",
+  "version": "0.4.0",
   "keywords": ["strapi", "strapi5", "strapi-plugin", "webp", "upload", "media", "s3"],
   "type": "commonjs",
   "engines": {

@@ -3,6 +3,6 @@
   "include": ["./src"],
   "compilerOptions": {
     "rootDir": "../",
-    "baseUrl": "."
+    "ignoreDeprecations": "5.0"
   }
 }
