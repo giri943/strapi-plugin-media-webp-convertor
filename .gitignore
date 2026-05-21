@@ -102,6 +102,10 @@ public/uploads/*
 dist
 build
 
+# Compiled JS artifacts that may land in src directories during a bad build
+server/src/**/*.js
+admin/src/**/*.js
+
 
 ############################
 # Node.js
