@@ -54,6 +54,24 @@ export default () => ({
     },
     {
       method: 'GET' as const,
+      path: '/local-migration/stats',
+      handler: 'localMigration.getStats',
+      config: { policies: requireActions(PLUGIN_ACTIONS.migrationLocalS3) },
+    },
+    {
+      method: 'POST' as const,
+      path: '/local-migration/test-connection',
+      handler: 'localMigration.testConnection',
+      config: { policies: requireActions(PLUGIN_ACTIONS.migrationLocalS3) },
+    },
+    {
+      method: 'POST' as const,
+      path: '/local-migration/migrate-batch',
+      handler: 'localMigration.migrateBatch',
+      config: { policies: requireActions(PLUGIN_ACTIONS.migrationLocalS3) },
+    },
+    {
+      method: 'GET' as const,
       path: '/conversion/stats',
       handler: 'conversion.stats',
       config: { policies: requireActions(PLUGIN_ACTIONS.conversionList) },
