@@ -21,6 +21,8 @@ If your Strapi project is serving JPEGs and PNGs, you're sending more bytes than
 
 ```bash
 npm install strapi-plugin-media-webp-convertor
+# or
+yarn add strapi-plugin-media-webp-convertor
 ```
 
 Add it to `config/plugins.ts`:
