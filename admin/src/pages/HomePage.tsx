@@ -20,6 +20,9 @@ import {
   postS3CopyBatch,
   postS3DeleteBatch,
   postS3TestConnection,
+  getLocalMigrationStats,
+  postLocalMigrationTestConnection,
+  postLocalMigrationBatch,
   getConversionStats,
   getConversionFiles,
   postConversionBatch,
@@ -199,6 +202,440 @@ function logLine(msg: string): string {
   return `[${nowTimestamp()}] ${msg}`;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Local → S3 migration card                                          */
+/* ------------------------------------------------------------------ */
+
+const LocalMigrationCard = () => {
+  const [localStats, setLocalStats] = useState<{ count: number; totalSizeMB: number } | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+
+  const [lmRegion, setLmRegion] = useState('');
+  const [lmBucket, setLmBucket] = useState('');
+  const [lmAccessKeyId, setLmAccessKeyId] = useState('');
+  const [lmSecretAccessKey, setLmSecretAccessKey] = useState('');
+  const [lmBaseUrl, setLmBaseUrl] = useState('');
+  const [lmKeyPrefix, setLmKeyPrefix] = useState('');
+  const [lmPreserveFolders, setLmPreserveFolders] = useState(false);
+  const [lmDeleteLocal, setLmDeleteLocal] = useState(false);
+
+  const [lmTestBusy, setLmTestBusy] = useState(false);
+  const [lmConnectionOk, setLmConnectionOk] = useState(false);
+  const [lmTestMessage, setLmTestMessage] = useState<string | null>(null);
+
+  const [lmRunning, setLmRunning] = useState(false);
+  const [lmDone, setLmDone] = useState(false);
+  const [lmSucceeded, setLmSucceeded] = useState(0);
+  const [lmFailed, setLmFailed] = useState(0);
+  const [lmInitialTotal, setLmInitialTotal] = useState(0);
+  const [lmLog, setLmLog] = useState<string[]>([]);
+  const lmStopRef = useRef(false);
+  const [lmLogsOpen, setLmLogsOpen] = useState(false);
+
+  const loadLocalStats = useCallback(async () => {
+    setStatsLoading(true);
+    try {
+      setLocalStats(await getLocalMigrationStats());
+    } catch {
+      // silent
+    } finally {
+      setStatsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadLocalStats(); }, [loadLocalStats]);
+
+  const invalidateLmConnection = useCallback(() => {
+    setLmConnectionOk(false);
+    setLmTestMessage(null);
+  }, []);
+
+  const runLmTestConnection = async () => {
+    setLmTestBusy(true);
+    setLmTestMessage(null);
+    try {
+      const r = await postLocalMigrationTestConnection({
+        region: lmRegion.trim(),
+        bucket: lmBucket.trim(),
+        accessKeyId: lmAccessKeyId.trim(),
+        secretAccessKey: lmSecretAccessKey.trim(),
+      });
+      setLmConnectionOk(r.ok);
+      setLmTestMessage(r.message);
+      if (r.ok) {
+        setLmDone(false);
+        setLmSucceeded(0);
+        setLmFailed(0);
+        setLmLog([]);
+      }
+    } catch (e) {
+      setLmConnectionOk(false);
+      setLmTestMessage(e instanceof Error ? e.message : 'Test failed');
+    } finally {
+      setLmTestBusy(false);
+    }
+  };
+
+  const startLmMigration = async () => {
+    const total = localStats?.count ?? 0;
+    if (total === 0) return;
+    const deleteWarning = lmDeleteLocal
+      ? ' Local files will be permanently deleted after each successful upload.'
+      : '';
+    if (
+      !window.confirm(
+        `This will upload ${total.toLocaleString()} file${total === 1 ? '' : 's'} to S3 and update database URLs.${deleteWarning} Continue?`
+      )
+    )
+      return;
+
+    lmStopRef.current = false;
+    setLmRunning(true);
+    setLmLogsOpen(true);
+    setLmDone(false);
+    setLmSucceeded(0);
+    setLmFailed(0);
+    setLmInitialTotal(total);
+    const startedAt = Date.now();
+    let totalSucceeded = 0;
+    let totalFailed = 0;
+
+    const payload = {
+      offset: 0,
+      batchSize: 5,
+      region: lmRegion.trim(),
+      bucket: lmBucket.trim(),
+      accessKeyId: lmAccessKeyId.trim(),
+      secretAccessKey: lmSecretAccessKey.trim(),
+      baseUrl: lmBaseUrl.trim(),
+      keyPrefix: lmKeyPrefix.trim(),
+      preserveFolders: lmPreserveFolders,
+      deleteLocal: lmDeleteLocal,
+    };
+
+    try {
+      while (true) {
+        if (lmStopRef.current) {
+          const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+          setLmLog((p) => [...p, logLine(`Stopped by user after ${elapsed}s.`)]);
+          break;
+        }
+
+        const r = await postLocalMigrationBatch(payload);
+        totalSucceeded += r.succeeded;
+        totalFailed += r.failed;
+        setLmSucceeded(totalSucceeded);
+        setLmFailed(totalFailed);
+        setLmLog((p) => [
+          ...p,
+          logLine(`Batch: ${r.succeeded} uploaded, ${r.failed} failed. ${r.remaining} remaining.`),
+        ]);
+
+        if (r.done) {
+          const elapsed = Date.now() - startedAt;
+          const elapsedStr =
+            elapsed >= 60_000
+              ? `${(elapsed / 60_000).toFixed(1)} min`
+              : `${(elapsed / 1000).toFixed(1)} s`;
+          setLmLog((p) => [
+            ...p,
+            logLine(
+              `Migration complete in ${elapsedStr}. ${totalSucceeded} file${totalSucceeded === 1 ? '' : 's'} uploaded. Credentials cleared.`
+            ),
+          ]);
+          setLmDone(true);
+          setLmConnectionOk(false);
+          setLmTestMessage(null);
+          setLmAccessKeyId('');
+          setLmSecretAccessKey('');
+          void loadLocalStats();
+          break;
+        }
+
+        if (r.processed > 0 && r.succeeded === 0) {
+          setLmLog((p) => [
+            ...p,
+            logLine('Entire batch failed — stopping to prevent a loop. Check errors and retry.'),
+          ]);
+          break;
+        }
+      }
+    } catch (e) {
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      setLmLog((p) => [
+        ...p,
+        logLine(`${e instanceof Error ? e.message : 'Migration failed'} (after ${elapsed}s)`),
+      ]);
+    } finally {
+      setLmRunning(false);
+    }
+  };
+
+  const lmFormReady = Boolean(
+    lmRegion.trim() && lmBucket.trim() && lmAccessKeyId.trim() && lmSecretAccessKey.trim() && lmBaseUrl.trim()
+  );
+  const lmProgressPct =
+    lmInitialTotal > 0 ? Math.min(100, Math.round((lmSucceeded / lmInitialTotal) * 100)) : 0;
+
+  return (
+    <Box background="neutral0" padding={6} hasRadius shadow="filterShadow">
+      <Flex direction="column" alignItems="stretch" gap={5}>
+        <Box>
+          <Typography variant="delta" tag="h2">Local → S3 migration</Typography>
+          <Box paddingTop={1}>
+            <Typography variant="omega" textColor="neutral600">
+              Upload all locally stored media files to an S3 bucket and rewrite the database URLs.
+              Format variants (thumbnail, small, medium, large) are migrated alongside each file.
+              After migration, switch your upload provider to S3 in{' '}
+              <code>config/plugins.ts</code> and restart Strapi.
+            </Typography>
+          </Box>
+        </Box>
+
+        <Divider />
+
+        {statsLoading ? (
+          <Typography variant="omega" textColor="neutral500">Checking local files…</Typography>
+        ) : localStats ? (
+          localStats.count === 0 ? (
+            <Box padding={4} background="neutral100" hasRadius>
+              <Typography variant="omega" textColor="neutral600">
+                No local files detected — all media is already on an external provider.
+              </Typography>
+            </Box>
+          ) : (
+            <Box padding={4} background="neutral100" hasRadius>
+              <Typography variant="omega" fontWeight="bold" textColor="neutral800">
+                {localStats.count.toLocaleString()} local file{localStats.count === 1 ? '' : 's'} ·{' '}
+                {localStats.totalSizeMB.toFixed(1)} MB
+              </Typography>
+              <Box paddingTop={1}>
+                <Typography variant="pi" textColor="neutral600">
+                  Stored in <code>public/uploads/</code>. All format variants are included.
+                </Typography>
+              </Box>
+            </Box>
+          )
+        ) : null}
+
+        <div style={gridRow}>
+          <Field.Root name="lmRegion">
+            <Field.Label>AWS region<RequiredMark /></Field.Label>
+            <Field.Input
+              value={lmRegion}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => { setLmRegion(e.target.value); invalidateLmConnection(); }}
+              placeholder="ap-south-1"
+              disabled={lmRunning}
+            />
+          </Field.Root>
+          <Field.Root name="lmBucket">
+            <Field.Label>S3 bucket<RequiredMark /></Field.Label>
+            <Field.Input
+              value={lmBucket}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => { setLmBucket(e.target.value); invalidateLmConnection(); }}
+              placeholder="my-media-bucket"
+              disabled={lmRunning}
+            />
+          </Field.Root>
+        </div>
+
+        <div style={gridRow}>
+          <Field.Root name="lmAccessKeyId">
+            <Field.Label>Access key ID<RequiredMark /></Field.Label>
+            <Field.Input
+              value={lmAccessKeyId}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => { setLmAccessKeyId(e.target.value); invalidateLmConnection(); }}
+              placeholder="AKIAIOSFODNN7EXAMPLE"
+              disabled={lmRunning}
+              autoComplete="off"
+            />
+          </Field.Root>
+          <Field.Root name="lmSecretAccessKey">
+            <Field.Label>Secret access key<RequiredMark /></Field.Label>
+            <Field.Input
+              type="password"
+              value={lmSecretAccessKey}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => { setLmSecretAccessKey(e.target.value); invalidateLmConnection(); }}
+              placeholder="Your secret access key"
+              disabled={lmRunning}
+              autoComplete="off"
+            />
+          </Field.Root>
+        </div>
+
+        <Field.Root
+          name="lmBaseUrl"
+          hint="The public URL prefix for served files — e.g. https://my-bucket.s3.ap-south-1.amazonaws.com or your CDN URL. Database records will be updated to this URL."
+        >
+          <Field.Label>Base URL (how files will be served)<RequiredMark /></Field.Label>
+          <Field.Input
+            value={lmBaseUrl}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => { setLmBaseUrl(e.target.value); invalidateLmConnection(); }}
+            placeholder="https://my-bucket.s3.ap-south-1.amazonaws.com"
+            disabled={lmRunning}
+          />
+          <Field.Hint />
+        </Field.Root>
+
+        <Field.Root
+          name="lmKeyPrefix"
+          hint="Optional prefix added before every S3 key. e.g. uploads/ stores files at uploads/filename.jpg. Leave empty for bucket root."
+        >
+          <Field.Label>Key prefix (optional)</Field.Label>
+          <Field.Input
+            value={lmKeyPrefix}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setLmKeyPrefix(e.target.value)}
+            placeholder="uploads/"
+            disabled={lmRunning}
+          />
+          <Field.Hint />
+        </Field.Root>
+
+        <Flex direction="column" alignItems="stretch" gap={3}>
+          <Checkbox
+            checked={lmPreserveFolders}
+            onCheckedChange={(v: boolean | 'indeterminate') => setLmPreserveFolders(v === true)}
+            disabled={lmRunning}
+          >
+            Preserve media library folder structure in S3 keys
+          </Checkbox>
+          <Checkbox
+            checked={lmDeleteLocal}
+            onCheckedChange={(v: boolean | 'indeterminate') => setLmDeleteLocal(v === true)}
+            disabled={lmRunning}
+          >
+            Delete local files after successful upload
+          </Checkbox>
+        </Flex>
+
+        {lmDeleteLocal && (
+          <Alert
+            title="Local files will be deleted"
+            variant="warning"
+            closeLabel="Dismiss"
+            onClose={() => setLmDeleteLocal(false)}
+          >
+            Each file is deleted immediately after it is successfully uploaded and the database record is
+            updated. Make sure you have a backup before starting.
+          </Alert>
+        )}
+
+        {lmTestMessage && (
+          <Alert
+            title={lmConnectionOk ? 'Connection OK' : 'Connection failed'}
+            variant={lmConnectionOk ? 'success' : 'danger'}
+            closeLabel="Dismiss"
+            onClose={() => setLmTestMessage(null)}
+          >
+            {lmTestMessage}
+          </Alert>
+        )}
+
+        {(lmRunning || lmDone) && lmInitialTotal > 0 && (
+          <Box
+            padding={4}
+            background="neutral100"
+            hasRadius
+            borderColor="neutral150"
+            borderStyle="solid"
+            borderWidth="1px"
+          >
+            <Flex justifyContent="space-between" alignItems="baseline" wrap="wrap" gap={2}>
+              <Typography variant="omega" fontWeight="bold" textColor="neutral800">
+                {lmSucceeded.toLocaleString()} / {lmInitialTotal.toLocaleString()} uploaded ({lmProgressPct}%)
+              </Typography>
+              {lmFailed > 0 && (
+                <Typography variant="pi" style={{ color: '#c9553f' }}>
+                  {lmFailed} failed
+                </Typography>
+              )}
+            </Flex>
+            <Box paddingTop={2} width="100%">
+              <ProgressBar value={lmProgressPct} max={100} />
+            </Box>
+          </Box>
+        )}
+
+        <Flex gap={2} alignItems="center" wrap="wrap">
+          <Button
+            variant="secondary"
+            onClick={() => void runLmTestConnection()}
+            loading={lmTestBusy}
+            disabled={!lmFormReady || lmRunning}
+          >
+            Test connection
+          </Button>
+          {lmRunning ? (
+            <Button variant="danger" onClick={() => { lmStopRef.current = true; }}>Stop</Button>
+          ) : (
+            <Button
+              onClick={() => void startLmMigration()}
+              disabled={!lmConnectionOk || !lmFormReady || lmDone || (localStats?.count ?? 0) === 0}
+            >
+              {lmDone ? 'Migration complete' : 'Start migration'}
+            </Button>
+          )}
+          {lmDone && (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setLmDone(false);
+                setLmSucceeded(0);
+                setLmFailed(0);
+                setLmLog([]);
+                void loadLocalStats();
+              }}
+            >
+              New migration
+            </Button>
+          )}
+        </Flex>
+
+        {(lmLog.length > 0 || lmDone) && (
+          <Box background="neutral0" hasRadius borderColor="neutral150" borderStyle="solid" borderWidth="1px">
+            <div
+              onClick={() => setLmLogsOpen((o) => !o)}
+              style={{ cursor: 'pointer', padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+            >
+              <Typography variant="omega" fontWeight="bold" textColor="neutral700">
+                Execution Logs
+                {lmLog.length > 0 && (
+                  <span style={{ fontWeight: 'normal', marginLeft: 8 }}>
+                    ({lmFailed > 0 ? `${lmFailed} error${lmFailed === 1 ? '' : 's'}, ` : ''}{lmSucceeded} success)
+                  </span>
+                )}
+              </Typography>
+              <Typography variant="pi" textColor="neutral500">{lmLogsOpen ? '▲ Collapse' : '▼ Expand'}</Typography>
+            </div>
+            {lmLogsOpen && (
+              <>
+                {lmDone && (
+                  <Box padding={4} background="success100" borderColor="success200" borderStyle="solid" borderWidth="1px 0 0 0">
+                    <Typography variant="omega" textColor="success600">
+                      Migration complete. Update your upload provider in <code>config/plugins.ts</code> to use S3 and restart Strapi to finish the switch.
+                    </Typography>
+                  </Box>
+                )}
+                {lmLog.length > 0 && (
+                  <Box
+                    padding={3}
+                    background="neutral100"
+                    style={{ maxHeight: 240, overflowY: 'auto', fontFamily: 'monospace', fontSize: 13, lineHeight: 1.6, borderTop: '1px solid #dcdce4' }}
+                  >
+                    {lmLog.map((line, i) => (
+                      <div key={i}>{line}</div>
+                    ))}
+                  </Box>
+                )}
+              </>
+            )}
+          </Box>
+        )}
+      </Flex>
+    </Box>
+  );
+};
+
 const MigrationPanel = () => {
   const [oldUrl, setOldUrl] = useState('');
   const [newUrl, setNewUrl] = useState('');
@@ -238,6 +675,7 @@ const MigrationPanel = () => {
 
   /* ------ Delete section state ------ */
   const [delExpanded, setDelExpanded] = useState(false);
+  const [copyLogsOpen, setCopyLogsOpen] = useState(false);
   const [delRegion, setDelRegion] = useState('');
   const [delBucket, setDelBucket] = useState('');
   const [delPrefix, setDelPrefix] = useState('');
@@ -394,6 +832,7 @@ const MigrationPanel = () => {
     if (!s3FormReady || !s3ConnectionOk) return;
     s3StopRef.current = false;
     setS3CopyRunning(true);
+    setCopyLogsOpen(true);
     setS3CopyComplete(false);
     const copyStartedAt = Date.now();
 
@@ -580,578 +1019,442 @@ const MigrationPanel = () => {
     s3TotalForProgress > 0 ? Math.min(100, Math.round((s3CopiedSoFar / s3TotalForProgress) * 100)) : 0;
 
   return (
-    <Flex direction="column" alignItems="stretch" gap={4}>
+    <Flex direction="column" alignItems="stretch" gap={6}>
+      <Tabs.Root defaultValue="local">
+        <Tabs.List aria-label="Migration tools">
+          <Tabs.Trigger value="local">Local to S3</Tabs.Trigger>
+          <Tabs.Trigger value="url">URL Rewrite</Tabs.Trigger>
+          <Tabs.Trigger value="copy">S3 Batch Copy</Tabs.Trigger>
+        </Tabs.List>
 
-      {/* --- URL migration card --- */}
-      <Box background="neutral0" padding={6} hasRadius shadow="filterShadow">
-        <Flex direction="column" alignItems="stretch" gap={5}>
-          <Box>
-            <Typography variant="delta" tag="h2">URL migration</Typography>
-            <Box paddingTop={1}>
-              <Typography variant="omega" textColor="neutral600">
-                Rewrite the URL prefix stored on every media record (including format thumbnails).
-                This updates the database only — files in storage are not moved.
-              </Typography>
-            </Box>
+        {/* --- Local to S3 tab --- */}
+        <Tabs.Content value="local">
+          <Box paddingTop={4}>
+            <LocalMigrationCard />
           </Box>
+        </Tabs.Content>
 
-          <Divider />
-
-          <div style={gridRow}>
-            <Field.Root name="oldUrlPrefix" hint="The current prefix you want to replace.">
-              <Field.Label>
-                Old URL prefix
-                <RequiredMark />
-              </Field.Label>
-              <Field.Input
-                value={oldUrl}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => { setOldUrl(e.target.value); setLog(null); setPreview(null); }}
-                placeholder="https://staging-cdn.example.com"
-                disabled={urlBusy}
-                required
-              />
-              <Field.Hint />
-            </Field.Root>
-            <Field.Root name="newUrlPrefix" hint="The new prefix that will replace the old one.">
-              <Field.Label>
-                New URL prefix
-                <RequiredMark />
-              </Field.Label>
-              <Field.Input
-                value={newUrl}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => { setNewUrl(e.target.value); setLog(null); setPreview(null); }}
-                placeholder="https://prod-cdn.example.com"
-                disabled={urlBusy}
-                required
-              />
-              <Field.Hint />
-            </Field.Root>
-          </div>
-
-          {preview !== null && (
-            <Box padding={4} background="neutral100" hasRadius borderColor="neutral150" borderStyle="solid" borderWidth="1px">
-              <Typography variant="omega" textColor="neutral800" fontWeight="bold">
-                {preview.matchCount} matching media record{preview.matchCount === 1 ? '' : 's'}
-              </Typography>
-              <Box paddingTop={1}>
-                <Typography variant="pi" textColor="neutral600">
-                  Preview is ready. Use Apply URL replace only after you have verified the prefixes.
-                </Typography>
-              </Box>
-            </Box>
-          )}
-
-          <Flex gap={2}>
-            <Button variant="secondary" onClick={() => void runPreview()} loading={urlBusy} disabled={!urlFormReady}>
-              Preview matches
-            </Button>
-            <Button variant="danger" onClick={() => void runReplace()} loading={urlBusy} disabled={!urlFormReady}>
-              Apply URL replace
-            </Button>
-          </Flex>
-        </Flex>
-      </Box>
-
-      {/* --- S3 copy card --- */}
-      <Box background="neutral0" padding={6} hasRadius shadow="filterShadow">
-        <Flex direction="column" alignItems="stretch" gap={5}>
-          <Box>
-            <Typography variant="delta" tag="h2">S3 batch copy</Typography>
-            <Box paddingTop={1}>
-              <Typography variant="omega" textColor="neutral600">
-                Every field under Source is required (including both source access keys). Under Destination, only
-                the access key ID and secret access key are optional — leave both blank to run CopyObject with the
-                source credentials (for example when the source principal is allowed to write to the destination bucket).
-                Values are sent per request only and are not stored. Run Test connection first — Run copy batch stays
-                disabled until the test succeeds.
-              </Typography>
-            </Box>
-          </Box>
-
-          <Divider />
-
-          {/* Source: read + list identity (required) */}
-          <Box
-            padding={5}
-            background="neutral100"
-            borderColor="neutral150"
-            borderStyle="solid"
-            borderWidth="1px"
-            hasRadius
-          >
-            <Flex direction="column" alignItems="stretch" gap={4}>
-              <Box>
-                <Typography variant="delta" tag="h3">Source</Typography>
-                <Box paddingTop={1}>
-                  <Typography variant="pi" textColor="neutral600">
-                    Region, bucket, key prefix, and source AWS keys are required. Prefix may be empty to list the whole bucket.
-                  </Typography>
+        {/* --- URL Rewrite tab --- */}
+        <Tabs.Content value="url">
+          <Box paddingTop={4}>
+            <Box background="neutral0" padding={6} hasRadius shadow="filterShadow">
+              <Flex direction="column" alignItems="stretch" gap={5}>
+                <Box>
+                  <Typography variant="delta" tag="h2">URL Rewrite</Typography>
+                  <Box paddingTop={1}>
+                    <Typography variant="omega" textColor="neutral600">
+                      Rewrite the URL prefix stored on every media record (including format thumbnails).
+                      This updates the database only — files in storage are not moved.
+                    </Typography>
+                  </Box>
                 </Box>
-              </Box>
 
-              <Field.Root name="region" hint="Use the region where the source bucket lives.">
-                <Field.Label>
-                  Source AWS region
-                  <RequiredMark />
-                </Field.Label>
-                <Field.Input
-                  value={region}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => { setRegion(e.target.value); invalidateS3Connection(); }}
-                  placeholder="ap-south-1"
-                  disabled={s3FieldsLocked}
-                  required
-                />
-                <Field.Hint />
-              </Field.Root>
+                <Divider />
 
-              <div style={gridRow}>
-                <Field.Root name="srcBucket" hint="Bucket you are copying from.">
-                  <Field.Label>
-                    Source bucket
-                    <RequiredMark />
-                  </Field.Label>
-                  <Field.Input
-                    value={srcBucket}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => { setSrcBucket(e.target.value); invalidateS3Connection(); }}
-                    placeholder="my-source-bucket"
-                    disabled={s3FieldsLocked}
-                    required
-                  />
-                  <Field.Hint />
-                </Field.Root>
-                <Field.Root
-                  name="srcPrefix"
-                  hint="Only keys starting with this prefix are listed. Leave empty to include the entire bucket."
-                >
-                  <Field.Label>Source key prefix (required field; may be empty)</Field.Label>
-                  <Field.Input
-                    value={srcPrefix}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => { setSrcPrefix(e.target.value); invalidateS3Connection(); }}
-                    placeholder="uploads/"
-                    disabled={s3FieldsLocked}
-                  />
-                  <Field.Hint />
-                </Field.Root>
-              </div>
+                <div style={gridRow}>
+                  <Field.Root name="oldUrlPrefix" hint="The current prefix you want to replace.">
+                    <Field.Label>Old URL prefix<RequiredMark /></Field.Label>
+                    <Field.Input
+                      value={oldUrl}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => { setOldUrl(e.target.value); setLog(null); setPreview(null); }}
+                      placeholder="https://staging-cdn.example.com"
+                      disabled={urlBusy}
+                      required
+                    />
+                    <Field.Hint />
+                  </Field.Root>
+                  <Field.Root name="newUrlPrefix" hint="The new prefix that will replace the old one.">
+                    <Field.Label>New URL prefix<RequiredMark /></Field.Label>
+                    <Field.Input
+                      value={newUrl}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => { setNewUrl(e.target.value); setLog(null); setPreview(null); }}
+                      placeholder="https://prod-cdn.example.com"
+                      disabled={urlBusy}
+                      required
+                    />
+                    <Field.Hint />
+                  </Field.Root>
+                </div>
 
-              <div style={gridRow}>
-                <Field.Root
-                  name="sourceAccessKeyId"
-                  hint="IAM user or key that can list and read objects in the source bucket."
-                >
-                  <Field.Label>
-                    Source access key ID
-                    <RequiredMark />
-                  </Field.Label>
-                  <Field.Input
-                    value={sourceAccessKeyId}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => { setSourceAccessKeyId(e.target.value); invalidateS3Connection(); }}
-                    placeholder="e.g. AKIAIOSFODNN7EXAMPLE"
-                    disabled={s3FieldsLocked}
-                    autoComplete="off"
-                    required
-                  />
-                  <Field.Hint />
-                </Field.Root>
-                <Field.Root name="sourceSecretAccessKey" hint="The secret that pairs with the access key ID above.">
-                  <Field.Label>
-                    Source secret access key
-                    <RequiredMark />
-                  </Field.Label>
-                  <Field.Input
-                    type="password"
-                    value={sourceSecretAccessKey}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => { setSourceSecretAccessKey(e.target.value); invalidateS3Connection(); }}
-                    placeholder="Your source secret access key"
-                    disabled={s3FieldsLocked}
-                    autoComplete="off"
-                    required
-                  />
-                  <Field.Hint />
-                </Field.Root>
-              </div>
-            </Flex>
-          </Box>
+                {preview !== null && (
+                  <Box padding={4} background="neutral100" hasRadius borderColor="neutral150" borderStyle="solid" borderWidth="1px">
+                    <Typography variant="omega" textColor="neutral800" fontWeight="bold">
+                      {preview.matchCount} matching media record{preview.matchCount === 1 ? '' : 's'}
+                    </Typography>
+                    <Box paddingTop={1}>
+                      <Typography variant="pi" textColor="neutral600">
+                        Preview is ready. Verify the prefixes before applying.
+                      </Typography>
+                    </Box>
+                  </Box>
+                )}
 
-          {/* Destination: write target; only access keys optional */}
-          <Box
-            padding={5}
-            background="neutral100"
-            borderColor="neutral150"
-            borderStyle="solid"
-            borderWidth="1px"
-            hasRadius
-          >
-            <Flex direction="column" alignItems="stretch" gap={4}>
-              <Box>
-                <Typography variant="delta" tag="h3">Destination</Typography>
-                <Box paddingTop={1}>
-                  <Typography variant="pi" textColor="neutral600">
-                    Bucket, optional destination region (defaults to the source region if empty), and optional prefix
-                    define where objects are written. Destination access key and secret are optional — leave both blank
-                    to perform CopyObject with the source credentials above.
-                  </Typography>
-                </Box>
-              </Box>
-
-              <div style={gridRow}>
-                <Field.Root name="dstBucket" hint="Bucket you are copying into.">
-                  <Field.Label>
-                    Destination bucket
-                    <RequiredMark />
-                  </Field.Label>
-                  <Field.Input
-                    value={dstBucket}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => { setDstBucket(e.target.value); invalidateS3Connection(); }}
-                    placeholder="my-dest-bucket"
-                    disabled={s3FieldsLocked}
-                    required
-                  />
-                  <Field.Hint />
-                </Field.Root>
-                <Field.Root
-                  name="destRegion"
-                  hint="AWS region where the destination bucket exists. Leave blank to use the same region as the source."
-                >
-                  <Field.Label>Destination AWS region (optional)</Field.Label>
-                  <Field.Input
-                    value={destRegion}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => { setDestRegion(e.target.value); invalidateS3Connection(); }}
-                    placeholder="eu-west-1"
-                    disabled={s3FieldsLocked}
-                  />
-                  <Field.Hint />
-                </Field.Root>
-              </div>
-              <Field.Root
-                name="dstPrefix"
-                hint="Folder under the destination bucket. A trailing slash is added automatically — e.g. entering backup copies source objects into backup/upload/a.webp."
-              >
-                <Field.Label>Destination key prefix (optional)</Field.Label>
-                <Field.Input
-                  value={dstPrefix}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => { setDstPrefix(e.target.value); invalidateS3Connection(); }}
-                  placeholder="uploads/"
-                  disabled={s3FieldsLocked}
-                />
-                <Field.Hint />
-              </Field.Root>
-
-              <Divider />
-
-              <Typography variant="omega" textColor="neutral700" fontWeight="bold">
-                Destination AWS credentials (optional)
-              </Typography>
-              <div style={gridRow}>
-                <Field.Root
-                  name="destAccessKeyId"
-                  hint="Provide both destination keys, or leave both empty to reuse source keys for writes."
-                >
-                  <Field.Label>Destination access key ID (optional)</Field.Label>
-                  <Field.Input
-                    value={destAccessKeyId}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => { setDestAccessKeyId(e.target.value); invalidateS3Connection(); }}
-                    placeholder="e.g. AKIAIOSFODNN7EXAMPLE"
-                    disabled={s3FieldsLocked}
-                    autoComplete="off"
-                  />
-                  <Field.Hint />
-                </Field.Root>
-                <Field.Root name="destSecretAccessKey" hint="The secret that pairs with the destination access key ID.">
-                  <Field.Label>Destination secret access key (optional)</Field.Label>
-                  <Field.Input
-                    type="password"
-                    value={destSecretAccessKey}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => { setDestSecretAccessKey(e.target.value); invalidateS3Connection(); }}
-                    placeholder="Your destination secret access key"
-                    disabled={s3FieldsLocked}
-                    autoComplete="off"
-                  />
-                  <Field.Hint />
-                </Field.Root>
-              </div>
-            </Flex>
-          </Box>
-
-          {s3TestMessage && (
-            <Alert
-              title={s3ConnectionOk ? 'Connection OK' : 'Connection check'}
-              variant={s3ConnectionOk ? 'success' : 'danger'}
-              closeLabel="Dismiss"
-              onClose={() => setS3TestMessage(null)}
-            >
-              {s3ConnectionOk ? (
-                s3TestSuccessDetail ? (
-                  <Typography variant="omega" textColor="neutral600">
-                    {s3TestSuccessDetail}
-                  </Typography>
-                ) : null
-              ) : (
-                s3TestMessage
-              )}
-            </Alert>
-          )}
-
-          {(s3ConnectionOk || s3CopyComplete) && s3SourceObjectCount !== null && (
-            <Box
-              padding={4}
-              background="neutral100"
-              hasRadius
-              borderColor="neutral150"
-              borderStyle="solid"
-              borderWidth="1px"
-            >
-              <Typography variant="omega" textColor="neutral800" fontWeight="bold">
-                {s3SourceObjectCount.toLocaleString()} object
-                {s3SourceObjectCount === 1 ? '' : 's'} in the source
-                {srcPrefix.trim() ? ` (prefix "${srcPrefix.trim()}")` : ' (entire bucket)'} will be copied to the
-                destination in batches.
-              </Typography>
-              {s3SourceCountTruncated && (
-                <Box paddingTop={2}>
-                  <Typography variant="pi" textColor="warning600">
-                    Count hit the server safety limit; the true total may be higher. Re-run Test connection after
-                    narrowing the prefix if needed.
-                  </Typography>
-                </Box>
-              )}
-
-              <Divider marginTop={4} marginBottom={4} />
-
-              <Typography variant="sigma" textColor="neutral700" fontWeight="bold" tag="h4">
-                Copy progress
-              </Typography>
-              <Box paddingTop={2} width="100%">
-                <ProgressBar value={s3CopyProgressPct} max={100} />
-              </Box>
-              <Box paddingTop={2}>
-                <Typography variant="pi" textColor="neutral600">
-                  {s3TotalForProgress === 0
-                    ? 'No objects to copy under this prefix.'
-                    : `${s3CopiedSoFar.toLocaleString()} / ${s3TotalForProgress.toLocaleString()} object${
-                        s3TotalForProgress === 1 ? '' : 's'
-                      } copied (${s3CopyProgressPct}%${s3SourceCountTruncated ? ', approximate total' : ''})`}
-                </Typography>
-              </Box>
-            </Box>
-          )}
-
-          <Flex gap={2} alignItems="center" wrap="wrap">
-            <Button
-              variant="secondary"
-              onClick={() => void runS3TestConnection()}
-              loading={s3TestBusy}
-              disabled={!s3FormReady || urlBusy || s3CopyRunning}
-            >
-              Test connection
-            </Button>
-            {s3CopyRunning ? (
-              <Button variant="danger" onClick={stopS3Copy}>
-                Stop
-              </Button>
-            ) : (
-              <Button
-                onClick={() => void startS3Copy()}
-                loading={false}
-                disabled={copyDisabled}
-              >
-                {cursor ? 'Resume copy' : 'Start copy'}
-              </Button>
-            )}
-            {s3CopyComplete && (
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  setS3CopyComplete(false);
-                  setS3CopiedSoFar(0);
-                  setCursor(undefined);
-                  setS3CopyReport([]);
-                  setCopyLog([]);
-                }}
-              >
-                New copy
-              </Button>
-            )}
-            {s3CopyComplete && s3CopyReport.length > 0 && (
-              <Button variant="secondary" onClick={downloadCsvReport}>
-                Download report (CSV)
-              </Button>
-            )}
-            {s3CopyRunning && (
-              <Typography variant="pi" textColor="neutral600">
-                Copying in progress — batches run automatically. Click Stop to pause.
-              </Typography>
-            )}
-          </Flex>
-
-          {copyLog.length > 0 && (
-            <Box
-              padding={3}
-              background="neutral100"
-              hasRadius
-              style={{ maxHeight: 240, overflowY: 'auto', fontFamily: 'monospace', fontSize: 13, lineHeight: 1.6 }}
-            >
-              {copyLog.map((line, i) => (
-                <div key={i}>{line}</div>
-              ))}
-            </Box>
-          )}
-        </Flex>
-      </Box>
-
-      {/* --- Delete danger zone --- */}
-      <Box background="neutral0" padding={6} hasRadius shadow="filterShadow" borderColor="danger200" borderStyle="solid" borderWidth="1px">
-        <Flex direction="column" alignItems="stretch" gap={4}>
-          <Flex justifyContent="space-between" alignItems="center">
-            <Box>
-              <Typography variant="delta" tag="h2" textColor="danger600">Danger zone: delete objects from bucket</Typography>
-              <Box paddingTop={1}>
-                <Typography variant="omega" textColor="neutral600">
-                  Permanently remove all objects under a given bucket prefix. Use to clean up partially copied data before retrying.
-                  Requires <code>s3:ListBucket</code> + <code>s3:DeleteObject</code>. Credentials are cleared after completion.
-                </Typography>
-              </Box>
-            </Box>
-            <Button
-              variant="ghost"
-              onClick={() => setDelExpanded((x) => !x)}
-              style={{ flexShrink: 0, marginLeft: 16 }}
-            >
-              {delExpanded ? 'Collapse' : 'Expand'}
-            </Button>
-          </Flex>
-
-          {delExpanded && (
-            <>
-              <Divider />
-
-              <Flex gap={2} wrap="wrap">
-                <Button
-                  variant="tertiary"
-                  size="S"
-                  onClick={prefillDeleteFromDest}
-                  disabled={delRunning}
-                >
-                  Pre-fill from destination fields above
-                </Button>
-                {(delLog.length > 0 || delTotalDeleted > 0) && (
-                  <Button variant="ghost" size="S" onClick={resetDelete} disabled={delRunning}>
-                    Reset log
+                <Flex gap={2}>
+                  <Button variant="secondary" onClick={() => void runPreview()} loading={urlBusy} disabled={!urlFormReady}>
+                    Preview matches
                   </Button>
+                  <Button onClick={() => void runReplace()} loading={urlBusy} disabled={!urlFormReady}>
+                    Apply URL Replace
+                  </Button>
+                </Flex>
+
+                {log && (
+                  <Alert title="Result" variant={logVariant} closeLabel="Dismiss" onClose={() => setLog(null)}>
+                    {log}
+                  </Alert>
                 )}
               </Flex>
+            </Box>
+          </Box>
+        </Tabs.Content>
 
-              <div style={gridRow}>
-                <Field.Root name="delRegion" hint="AWS region where the target bucket lives. e.g. ap-south-1, us-east-1">
-                  <Field.Label>AWS region<RequiredMark /></Field.Label>
-                  <Field.Input
-                    value={delRegion}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setDelRegion(e.target.value)}
-                    placeholder="e.g. ap-south-1"
-                    disabled={delRunning}
-                    required
-                  />
-                  <Field.Hint />
-                </Field.Root>
-                <Field.Root name="delBucket" hint="Name of the S3 bucket to delete objects from.">
-                  <Field.Label>Bucket<RequiredMark /></Field.Label>
-                  <Field.Input
-                    value={delBucket}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setDelBucket(e.target.value)}
-                    placeholder="e.g. my-media-bucket"
-                    disabled={delRunning}
-                    required
-                  />
-                  <Field.Hint />
-                </Field.Root>
-              </div>
+        {/* --- S3 Batch Copy tab --- */}
+        <Tabs.Content value="copy">
+          <Box paddingTop={4}>
+            <Box background="neutral0" padding={6} hasRadius shadow="filterShadow">
+              <Flex direction="column" alignItems="stretch" gap={5}>
+                <Box>
+                  <Typography variant="delta" tag="h2">S3 Batch Copy</Typography>
+                  <Box paddingTop={1}>
+                    <Typography variant="omega" textColor="neutral600">
+                      Copy all objects from a source bucket to a destination bucket. Source credentials are required.
+                      Destination access keys are optional — leave both blank to reuse source credentials.
+                      Run <strong>Test Connection</strong> first; <strong>Start Copy</strong> is enabled only after a successful test.
+                    </Typography>
+                  </Box>
+                </Box>
 
-              <Field.Root name="delPrefix" hint="Only objects whose key starts with this prefix are deleted. Leave empty to delete the entire bucket (use with extreme caution).">
-                <Field.Label>Key prefix (optional)</Field.Label>
-                <Field.Input
-                  value={delPrefix}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setDelPrefix(e.target.value)}
-                  placeholder="e.g. backup/ or migration-archive/"
-                  disabled={delRunning}
-                />
-                <Field.Hint />
-              </Field.Root>
+                <Divider />
 
-              <div style={gridRow}>
-                <Field.Root name="delAccessKeyId" hint="IAM identity that has s3:ListBucket + s3:DeleteObject on the target bucket.">
-                  <Field.Label>Access key ID<RequiredMark /></Field.Label>
-                  <Field.Input
-                    value={delAccessKeyId}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setDelAccessKeyId(e.target.value)}
-                    placeholder="e.g. AKIAIOSFODNN7EXAMPLE"
-                    disabled={delRunning}
-                    autoComplete="off"
-                    required
-                  />
-                  <Field.Hint />
-                </Field.Root>
-                <Field.Root name="delSecretAccessKey" hint="The secret that pairs with the access key ID above.">
-                  <Field.Label>Secret access key<RequiredMark /></Field.Label>
-                  <Field.Input
-                    type="password"
-                    value={delSecretAccessKey}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setDelSecretAccessKey(e.target.value)}
-                    placeholder="Your secret access key"
-                    disabled={delRunning}
-                    autoComplete="off"
-                    required
-                  />
-                  <Field.Hint />
-                </Field.Root>
-              </div>
+                {/* 2-column Source | Destination layout */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', alignItems: 'start' }}>
 
-              {delTotalDeleted > 0 && (
-                <Typography variant="omega" textColor="danger600">
-                  {delTotalDeleted.toLocaleString()} object{delTotalDeleted === 1 ? '' : 's'} deleted so far
-                  {delComplete ? ' (complete)' : ' (in progress)'}
-                </Typography>
-              )}
+                  {/* Source column */}
+                  <Box padding={5} background="neutral100" borderColor="neutral150" borderStyle="solid" borderWidth="1px" hasRadius>
+                    <Flex direction="column" alignItems="stretch" gap={4}>
+                      <Box>
+                        <Typography variant="delta" tag="h3">Source</Typography>
+                        <Box paddingTop={1}>
+                          <Typography variant="pi" textColor="neutral600">All source fields and credentials are required.</Typography>
+                        </Box>
+                      </Box>
+                      <Field.Root name="region" hint="AWS region where the source bucket lives.">
+                        <Field.Label>AWS Region<RequiredMark /></Field.Label>
+                        <Field.Input
+                          value={region}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => { setRegion(e.target.value); invalidateS3Connection(); }}
+                          placeholder="ap-south-1"
+                          disabled={s3FieldsLocked}
+                          required
+                        />
+                        <Field.Hint />
+                      </Field.Root>
+                      <Field.Root name="srcBucket" hint="Bucket you are copying from.">
+                        <Field.Label>Source Bucket<RequiredMark /></Field.Label>
+                        <Field.Input
+                          value={srcBucket}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => { setSrcBucket(e.target.value); invalidateS3Connection(); }}
+                          placeholder="my-source-bucket"
+                          disabled={s3FieldsLocked}
+                          required
+                        />
+                        <Field.Hint />
+                      </Field.Root>
+                      <Field.Root name="srcPrefix" hint="Only keys starting with this prefix are listed. Leave empty to include the entire bucket.">
+                        <Field.Label>Key Prefix</Field.Label>
+                        <Field.Input
+                          value={srcPrefix}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => { setSrcPrefix(e.target.value); invalidateS3Connection(); }}
+                          placeholder="uploads/"
+                          disabled={s3FieldsLocked}
+                        />
+                        <Field.Hint />
+                      </Field.Root>
+                      <Field.Root name="sourceAccessKeyId" hint="IAM user or key that can list and read objects in the source bucket.">
+                        <Field.Label>Access Key ID<RequiredMark /></Field.Label>
+                        <Field.Input
+                          value={sourceAccessKeyId}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => { setSourceAccessKeyId(e.target.value); invalidateS3Connection(); }}
+                          placeholder="AKIAIOSFODNN7EXAMPLE"
+                          disabled={s3FieldsLocked}
+                          autoComplete="off"
+                          required
+                        />
+                        <Field.Hint />
+                      </Field.Root>
+                      <Field.Root name="sourceSecretAccessKey" hint="The secret that pairs with the access key ID above.">
+                        <Field.Label>Secret Access Key<RequiredMark /></Field.Label>
+                        <Field.Input
+                          type="password"
+                          value={sourceSecretAccessKey}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => { setSourceSecretAccessKey(e.target.value); invalidateS3Connection(); }}
+                          placeholder="Your source secret access key"
+                          disabled={s3FieldsLocked}
+                          autoComplete="off"
+                          required
+                        />
+                        <Field.Hint />
+                      </Field.Root>
+                    </Flex>
+                  </Box>
 
-              <Flex gap={2} alignItems="center">
-                {delRunning ? (
-                  <Button variant="danger" onClick={stopDelete}>Stop</Button>
-                ) : (
-                  <Button
-                    variant="danger"
-                    onClick={() => void startDelete()}
-                    disabled={!delRegion.trim() || !delBucket.trim() || !delAccessKeyId.trim() || !delSecretAccessKey.trim() || delComplete}
+                  {/* Destination column */}
+                  <Box padding={5} background="neutral100" borderColor="neutral150" borderStyle="solid" borderWidth="1px" hasRadius>
+                    <Flex direction="column" alignItems="stretch" gap={4}>
+                      <Box>
+                        <Typography variant="delta" tag="h3">Destination</Typography>
+                        <Box paddingTop={1}>
+                          <Typography variant="pi" textColor="neutral600">Bucket required. Leave credentials blank to reuse source keys.</Typography>
+                        </Box>
+                      </Box>
+                      <Field.Root name="dstBucket" hint="Bucket you are copying into.">
+                        <Field.Label>Destination Bucket<RequiredMark /></Field.Label>
+                        <Field.Input
+                          value={dstBucket}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => { setDstBucket(e.target.value); invalidateS3Connection(); }}
+                          placeholder="my-dest-bucket"
+                          disabled={s3FieldsLocked}
+                          required
+                        />
+                        <Field.Hint />
+                      </Field.Root>
+                      <Field.Root name="destRegion" hint="Leave blank to use the same region as the source.">
+                        <Field.Label>AWS Region (optional)</Field.Label>
+                        <Field.Input
+                          value={destRegion}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => { setDestRegion(e.target.value); invalidateS3Connection(); }}
+                          placeholder="eu-west-1"
+                          disabled={s3FieldsLocked}
+                        />
+                        <Field.Hint />
+                      </Field.Root>
+                      <Field.Root name="dstPrefix" hint="A trailing slash is added automatically — e.g. 'backup' copies into backup/filename.jpg.">
+                        <Field.Label>Key Prefix (optional)</Field.Label>
+                        <Field.Input
+                          value={dstPrefix}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => { setDstPrefix(e.target.value); invalidateS3Connection(); }}
+                          placeholder="backup/"
+                          disabled={s3FieldsLocked}
+                        />
+                        <Field.Hint />
+                      </Field.Root>
+                      <Field.Root name="destAccessKeyId" hint="Provide both destination keys, or leave both empty to reuse source keys.">
+                        <Field.Label>Access Key ID (optional)</Field.Label>
+                        <Field.Input
+                          value={destAccessKeyId}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => { setDestAccessKeyId(e.target.value); invalidateS3Connection(); }}
+                          placeholder="AKIAIOSFODNN7EXAMPLE"
+                          disabled={s3FieldsLocked}
+                          autoComplete="off"
+                        />
+                        <Field.Hint />
+                      </Field.Root>
+                      <Field.Root name="destSecretAccessKey" hint="The secret that pairs with the destination access key ID.">
+                        <Field.Label>Secret Access Key (optional)</Field.Label>
+                        <Field.Input
+                          type="password"
+                          value={destSecretAccessKey}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => { setDestSecretAccessKey(e.target.value); invalidateS3Connection(); }}
+                          placeholder="Your destination secret access key"
+                          disabled={s3FieldsLocked}
+                          autoComplete="off"
+                        />
+                        <Field.Hint />
+                      </Field.Root>
+                    </Flex>
+                  </Box>
+                </div>
+
+                {s3TestMessage && (
+                  <Alert
+                    title={s3ConnectionOk ? 'Connection OK' : 'Connection check'}
+                    variant={s3ConnectionOk ? 'success' : 'danger'}
+                    closeLabel="Dismiss"
+                    onClose={() => setS3TestMessage(null)}
                   >
-                    {delCursor ? 'Resume delete' : 'Delete objects'}
-                  </Button>
+                    {s3ConnectionOk ? (
+                      s3TestSuccessDetail ? (
+                        <Typography variant="omega" textColor="neutral600">{s3TestSuccessDetail}</Typography>
+                      ) : null
+                    ) : (
+                      s3TestMessage
+                    )}
+                  </Alert>
                 )}
-                {delComplete && (
-                  <Button variant="secondary" onClick={resetDelete}>Reset</Button>
+
+                {(s3ConnectionOk || s3CopyComplete) && s3SourceObjectCount !== null && (
+                  <Box padding={4} background="neutral100" hasRadius borderColor="neutral150" borderStyle="solid" borderWidth="1px">
+                    <Typography variant="omega" textColor="neutral800" fontWeight="bold">
+                      {s3SourceObjectCount.toLocaleString()} object{s3SourceObjectCount === 1 ? '' : 's'} in the source
+                      {srcPrefix.trim() ? ` (prefix "${srcPrefix.trim()}")` : ' (entire bucket)'} ready to copy.
+                    </Typography>
+                    {s3SourceCountTruncated && (
+                      <Box paddingTop={2}>
+                        <Typography variant="pi" textColor="warning600">
+                          Count hit the server safety limit; the true total may be higher.
+                        </Typography>
+                      </Box>
+                    )}
+                    <Divider marginTop={4} marginBottom={4} />
+                    <Typography variant="sigma" textColor="neutral700" fontWeight="bold" tag="h4">Copy progress</Typography>
+                    <Box paddingTop={2} width="100%">
+                      <ProgressBar value={s3CopyProgressPct} max={100} />
+                    </Box>
+                    <Box paddingTop={2}>
+                      <Typography variant="pi" textColor="neutral600">
+                        {s3TotalForProgress === 0
+                          ? 'No objects to copy under this prefix.'
+                          : `${s3CopiedSoFar.toLocaleString()} / ${s3TotalForProgress.toLocaleString()} object${s3TotalForProgress === 1 ? '' : 's'} copied (${s3CopyProgressPct}%${s3SourceCountTruncated ? ', approximate total' : ''})`}
+                      </Typography>
+                    </Box>
+                  </Box>
+                )}
+
+                <Flex gap={2} alignItems="center" wrap="wrap">
+                  <Button variant="secondary" onClick={() => void runS3TestConnection()} loading={s3TestBusy} disabled={!s3FormReady || urlBusy || s3CopyRunning}>
+                    Test Connection
+                  </Button>
+                  {s3CopyRunning ? (
+                    <Button variant="danger" onClick={stopS3Copy}>Stop</Button>
+                  ) : (
+                    <Button onClick={() => void startS3Copy()} disabled={copyDisabled}>
+                      {cursor ? 'Resume Copy' : 'Start Copy'}
+                    </Button>
+                  )}
+                  {s3CopyComplete && (
+                    <Button variant="secondary" onClick={() => { setS3CopyComplete(false); setS3CopiedSoFar(0); setCursor(undefined); setS3CopyReport([]); setCopyLog([]); setCopyLogsOpen(false); }}>
+                      New Copy
+                    </Button>
+                  )}
+                  {s3CopyComplete && s3CopyReport.length > 0 && (
+                    <Button variant="secondary" onClick={downloadCsvReport}>Download Report (CSV)</Button>
+                  )}
+                  {s3CopyRunning && (
+                    <Typography variant="pi" textColor="neutral600">Copying in progress — batches run automatically. Click Stop to pause.</Typography>
+                  )}
+                </Flex>
+
+                {copyLog.length > 0 && (
+                  <Box background="neutral0" hasRadius borderColor="neutral150" borderStyle="solid" borderWidth="1px">
+                    <div
+                      onClick={() => setCopyLogsOpen((o) => !o)}
+                      style={{ cursor: 'pointer', padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    >
+                      <Typography variant="omega" fontWeight="bold" textColor="neutral700">
+                        Copy Logs ({s3CopyReport.length} copied)
+                      </Typography>
+                      <Typography variant="pi" textColor="neutral500">{copyLogsOpen ? '▲ Collapse' : '▼ Expand'}</Typography>
+                    </div>
+                    {copyLogsOpen && (
+                      <Box padding={3} background="neutral100" style={{ maxHeight: 240, overflowY: 'auto', fontFamily: 'monospace', fontSize: 13, lineHeight: 1.6, borderTop: '1px solid #dcdce4' }}>
+                        {copyLog.map((line, i) => (
+                          <div key={i}>{line}</div>
+                        ))}
+                      </Box>
+                    )}
+                  </Box>
                 )}
               </Flex>
+            </Box>
 
-              {delLog.length > 0 && (
-                <Box
-                  padding={3}
-                  background="neutral100"
-                  hasRadius
-                  style={{ maxHeight: 200, overflowY: 'auto', fontFamily: 'monospace', fontSize: 13, lineHeight: 1.6 }}
-                >
-                  {delLog.map((line, i) => (
-                    <div key={i}>{line}</div>
-                  ))}
+            {/* Danger Zone accordion — scoped to S3 Batch Copy since it only affects S3 buckets */}
+            <Box marginTop={5} background="neutral0" hasRadius shadow="filterShadow" borderColor="danger200" borderStyle="solid" borderWidth="1px">
+              <div
+                onClick={() => setDelExpanded((x) => !x)}
+                style={{ cursor: 'pointer', padding: '16px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+              >
+                <Box>
+                  <Typography variant="delta" textColor="danger600">Danger Zone: Delete objects from bucket</Typography>
+                  <Box paddingTop={1}>
+                    <Typography variant="pi" textColor="neutral600">
+                      Permanently remove all objects under a given bucket prefix.{!delExpanded && ' Click to expand.'}
+                    </Typography>
+                  </Box>
+                </Box>
+                <Typography variant="pi" textColor="danger600" style={{ flexShrink: 0, marginLeft: 16 }}>
+                  {delExpanded ? '▲ Collapse' : '▼ Expand'}
+                </Typography>
+              </div>
+
+              {delExpanded && (
+                <Box padding={6} paddingTop={0}>
+                  <Divider marginBottom={5} />
+                  <Flex direction="column" alignItems="stretch" gap={4}>
+                    <Typography variant="omega" textColor="neutral600">
+                      Permanently remove all objects under a given prefix. Use to clean up partially copied data before retrying.
+                      Requires <code>s3:ListBucket</code> + <code>s3:DeleteObject</code>. Credentials are cleared after completion.
+                    </Typography>
+
+                    <Flex gap={2} wrap="wrap">
+                      <Button variant="tertiary" size="S" onClick={prefillDeleteFromDest} disabled={delRunning}>
+                        Pre-fill from destination fields
+                      </Button>
+                      {(delLog.length > 0 || delTotalDeleted > 0) && (
+                        <Button variant="ghost" size="S" onClick={resetDelete} disabled={delRunning}>Reset log</Button>
+                      )}
+                    </Flex>
+
+                    <div style={gridRow}>
+                      <Field.Root name="delRegion" hint="AWS region where the target bucket lives.">
+                        <Field.Label>AWS Region<RequiredMark /></Field.Label>
+                        <Field.Input value={delRegion} onChange={(e: ChangeEvent<HTMLInputElement>) => setDelRegion(e.target.value)} placeholder="ap-south-1" disabled={delRunning} required />
+                        <Field.Hint />
+                      </Field.Root>
+                      <Field.Root name="delBucket" hint="Name of the S3 bucket to delete objects from.">
+                        <Field.Label>Bucket<RequiredMark /></Field.Label>
+                        <Field.Input value={delBucket} onChange={(e: ChangeEvent<HTMLInputElement>) => setDelBucket(e.target.value)} placeholder="my-media-bucket" disabled={delRunning} required />
+                        <Field.Hint />
+                      </Field.Root>
+                    </div>
+
+                    <Field.Root name="delPrefix" hint="Only objects whose key starts with this prefix are deleted. Leave empty to delete the entire bucket (use with extreme caution).">
+                      <Field.Label>Key Prefix (optional)</Field.Label>
+                      <Field.Input value={delPrefix} onChange={(e: ChangeEvent<HTMLInputElement>) => setDelPrefix(e.target.value)} placeholder="backup/ or migration-archive/" disabled={delRunning} />
+                      <Field.Hint />
+                    </Field.Root>
+
+                    <div style={gridRow}>
+                      <Field.Root name="delAccessKeyId" hint="IAM identity that has s3:ListBucket + s3:DeleteObject on the target bucket.">
+                        <Field.Label>Access Key ID<RequiredMark /></Field.Label>
+                        <Field.Input value={delAccessKeyId} onChange={(e: ChangeEvent<HTMLInputElement>) => setDelAccessKeyId(e.target.value)} placeholder="AKIAIOSFODNN7EXAMPLE" disabled={delRunning} autoComplete="off" required />
+                        <Field.Hint />
+                      </Field.Root>
+                      <Field.Root name="delSecretAccessKey" hint="The secret that pairs with the access key ID above.">
+                        <Field.Label>Secret Access Key<RequiredMark /></Field.Label>
+                        <Field.Input type="password" value={delSecretAccessKey} onChange={(e: ChangeEvent<HTMLInputElement>) => setDelSecretAccessKey(e.target.value)} placeholder="Your secret access key" disabled={delRunning} autoComplete="off" required />
+                        <Field.Hint />
+                      </Field.Root>
+                    </div>
+
+                    {delTotalDeleted > 0 && (
+                      <Typography variant="omega" textColor="danger600">
+                        {delTotalDeleted.toLocaleString()} object{delTotalDeleted === 1 ? '' : 's'} deleted so far{delComplete ? ' (complete)' : ' (in progress)'}
+                      </Typography>
+                    )}
+
+                    <Flex gap={2} alignItems="center">
+                      {delRunning ? (
+                        <Button variant="danger" onClick={stopDelete}>Stop</Button>
+                      ) : (
+                        <Button variant="danger" onClick={() => void startDelete()} disabled={!delRegion.trim() || !delBucket.trim() || !delAccessKeyId.trim() || !delSecretAccessKey.trim() || delComplete}>
+                          {delCursor ? 'Resume Delete' : 'Delete Objects'}
+                        </Button>
+                      )}
+                      {delComplete && <Button variant="secondary" onClick={resetDelete}>Reset</Button>}
+                    </Flex>
+
+                    {delLog.length > 0 && (
+                      <Box padding={3} background="neutral100" hasRadius style={{ maxHeight: 200, overflowY: 'auto', fontFamily: 'monospace', fontSize: 13, lineHeight: 1.6 }}>
+                        {delLog.map((line, i) => <div key={i}>{line}</div>)}
+                      </Box>
+                    )}
+                  </Flex>
                 </Box>
               )}
-            </>
-          )}
-        </Flex>
-      </Box>
-
-      {/* --- Alert bar --- */}
-      {log && (
-        <Alert title="Migration result" variant={logVariant} closeLabel="Dismiss" onClose={() => setLog(null)}>
-          {log}
-        </Alert>
-      )}
+            </Box>
+          </Box>
+        </Tabs.Content>
+      </Tabs.Root>
     </Flex>
   );
 };
