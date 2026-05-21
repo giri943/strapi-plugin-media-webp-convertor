@@ -140,6 +140,73 @@ export async function postS3DeleteBatch(payload: Record<string, unknown>) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Local → S3 Migration API                                           */
+/* ------------------------------------------------------------------ */
+
+export type LocalMigrationStats = { count: number; totalSizeMB: number };
+
+export type LocalMigrationBatchResult = {
+  results: { id: number; ok: boolean; newUrl?: string; error?: string }[];
+  processed: number;
+  succeeded: number;
+  failed: number;
+  remaining: number;
+  done: boolean;
+};
+
+export async function getLocalMigrationStats(): Promise<LocalMigrationStats> {
+  const { get } = getFetchClient();
+  try {
+    const { data } = await get(`${basePath()}/local-migration/stats`);
+    const body = data as { data?: LocalMigrationStats };
+    if (!body?.data) throw new Error('Invalid stats response');
+    return body.data;
+  } catch (e) {
+    throw new Error(unwrapError(e));
+  }
+}
+
+export async function postLocalMigrationTestConnection(payload: {
+  region: string;
+  bucket: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+}): Promise<{ ok: boolean; message: string }> {
+  const { post } = getFetchClient();
+  try {
+    const { data } = await post(`${basePath()}/local-migration/test-connection`, payload);
+    const body = data as { data?: { ok: boolean; message: string } };
+    if (!body?.data) throw new Error('Invalid response');
+    return body.data;
+  } catch (e) {
+    throw new Error(unwrapError(e));
+  }
+}
+
+export async function postLocalMigrationBatch(payload: {
+  offset: number;
+  batchSize: number;
+  region: string;
+  bucket: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  baseUrl: string;
+  keyPrefix: string;
+  preserveFolders: boolean;
+  deleteLocal: boolean;
+}): Promise<LocalMigrationBatchResult> {
+  const { post } = getFetchClient();
+  try {
+    const { data } = await post(`${basePath()}/local-migration/migrate-batch`, payload);
+    const body = data as { data?: LocalMigrationBatchResult };
+    if (!body?.data) throw new Error('Invalid migration response');
+    return body.data;
+  } catch (e) {
+    throw new Error(unwrapError(e));
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Conversion API                                                      */
 /* ------------------------------------------------------------------ */
 

@@ -1,5 +1,5 @@
 import type { Core } from "@strapi/strapi";
 
-const destroy = ({ strapi }: { strapi: Core.Strapi }) => {};
+const destroy = (_ctx: { strapi: Core.Strapi }) => {};
 
 export default destroy;

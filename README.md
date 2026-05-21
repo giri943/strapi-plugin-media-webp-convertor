@@ -6,7 +6,7 @@ If your Strapi project is serving JPEGs and PNGs, you're sending more bytes than
 
 - **Auto-converts uploads** — any JPEG, PNG, GIF, BMP, TIFF, or HEIC uploaded through Strapi gets converted to WebP before it hits storage. No changes to your content types or frontend needed.
 - **Converts existing images** — a built-in admin UI to bulk-convert everything already in your media library, with search, filtering, per-file progress, and a storage savings report.
-- **Migration helpers** — tools to rewrite URL prefixes in the database and batch-copy or batch-delete objects between S3 buckets.
+- **Migration helpers** — move your local uploads to S3, rewrite URL prefixes in the database, or copy and delete S3 objects across buckets.
 
 ---
 
@@ -117,19 +117,32 @@ Each file row has a **Convert** button. After conversion it shows the before →
 
 ## Migration tools
 
-Go to **Settings → Media WebP & migration → Migration**.
+Go to **Settings → Media WebP & migration → Migration**. The tools are organized into three tabs.
 
-### URL prefix replacement
+### Local to S3
+
+If your media currently lives on disk (`public/uploads/`) and you want to switch to S3, this does the move for you.
+
+1. Enter your S3 region, bucket, access key, secret, and the public base URL where files will be served from (e.g. `https://my-bucket.s3.ap-south-1.amazonaws.com` or your CDN).
+2. Optionally tick **Preserve folder structure** to mirror your media library folders as S3 key prefixes.
+3. Optionally tick **Delete local files** to remove the originals from disk after each successful upload.
+4. **Test connection**, then **Start migration**.
+
+The plugin uploads each file plus its format variants (thumbnail / small / medium / large) and rewrites the database URL. When it finishes, update `config/plugins.ts` to use the S3 upload provider and restart Strapi.
+
+Required IAM permissions: `s3:ListBucket` + `s3:PutObject` on the destination bucket.
+
+### URL Rewrite
 
 If you moved your files to a new bucket or CDN, use this to rewrite the stored URL prefixes in the database without touching the files themselves.
 
 1. Enter the old prefix (e.g. `https://old-cdn.example.com`) and the new one.
 2. **Preview** to see how many records will be affected.
-3. **Apply** to run the replacement.
+3. **Apply URL Replace** to run the replacement.
 
 This updates both the main `url` field and all format variant URLs in `plugin::upload.file`.
 
-### S3 batch copy
+### S3 Batch Copy
 
 Copies all objects under a source prefix to a destination bucket, 100 at a time.
 
@@ -137,17 +150,15 @@ Copies all objects under a source prefix to a destination bucket, 100 at a time.
 
 **Destination:** bucket name is required. Region is optional (defaults to source). Access keys are optional — leave them blank to reuse the source credentials (works for same-account copies).
 
-Hit **Test connection** before starting — it validates credentials, checks IAM permissions, and counts the objects to be copied. The copy button is locked until the test passes.
+Hit **Test Connection** before starting — it validates credentials, checks IAM permissions, and counts the objects to be copied. The copy button is locked until the test passes.
 
 Required IAM permissions: `s3:ListBucket` + `s3:GetObject` on the source; `s3:ListBucket` + `s3:PutObject` on the destination.
 
 Credentials are sent with each request and are never stored server-side.
 
-### S3 batch delete
+#### Danger Zone — delete objects from a bucket
 
-Deletes all objects under a prefix, in batches. There's a confirmation dialog before anything is removed, and you can stop and resume mid-run.
-
-Can be pre-filled from the copy destination fields above it.
+Sits at the bottom of the S3 Batch Copy tab, collapsed by default. Use it to clean up a destination prefix before retrying a copy, or to wipe a bucket prefix entirely. There's a confirmation dialog before anything is removed, and you can stop and resume mid-run. Pre-fill from the copy destination fields above with one click.
 
 Required IAM permissions: `s3:ListBucket` + `s3:DeleteObject` on the target bucket.
 
@@ -164,9 +175,10 @@ Super Admin gets everything automatically. For other roles, go to **Settings →
 | `conversion.list` | View the Convert existing tab and stats |
 | `conversion.convert` | Run individual or bulk conversion |
 | `migration.preview` | Preview URL replacements |
-| `migration.replace` | Apply URL replacements |
-| `migration.s3-copy` | Run S3 batch copy |
-| `migration.s3-delete` | Run S3 batch delete |
+| `migration.replace-urls` | Apply URL replacements |
+| `migration.local-to-cloud` | Migrate local files to S3 |
+| `migration.batch-copy` | Run S3 batch copy |
+| `migration.batch-delete` | Run S3 batch delete (Danger Zone) |
 
 ---
 

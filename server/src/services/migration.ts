@@ -373,12 +373,13 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
             })
           );
           steps.push('Source: read OK');
-        } catch {
+        } catch (e) {
+          const detail = e instanceof Error ? ` Underlying error: ${e.message}` : '';
           return {
             ok: false,
             message:
               'Source credentials can list the bucket but cannot read objects (HeadObject failed). ' +
-              'Ensure the source IAM identity has s3:GetObject.',
+              `Ensure the source IAM identity has s3:GetObject.${detail}`,
           };
         }
 
@@ -392,11 +393,13 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
             })
           );
           steps.push('Destination: list OK');
-        } catch {
+        } catch (e) {
+          const detail = e instanceof Error ? ` Underlying error: ${e.message}` : '';
           return {
             ok: false,
             message:
-              'Cannot list the destination bucket. Ensure the destination IAM identity has s3:ListBucket on the destination bucket.',
+              'Cannot list the destination bucket. Ensure the destination IAM identity has s3:ListBucket on the destination bucket, ' +
+              `the bucket name is correct, and the destination region matches where the bucket actually lives.${detail}`,
           };
         }
 
