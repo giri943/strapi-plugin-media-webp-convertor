@@ -43,8 +43,8 @@
     "watch": "strapi-plugin watch",
     "watch:link": "strapi-plugin watch:link",
     "verify": "strapi-plugin verify",
-    "test:ts:front": "run -T tsc -p admin/tsconfig.json",
-    "test:ts:back": "run -T tsc -p server/tsconfig.json"
+    "test:ts:front": "npx tsc -p admin/tsconfig.json",
+    "test:ts:back": "npx tsc -p server/tsconfig.json"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.758.0",
@@ -81,7 +81,7 @@
   "strapi": {
     "kind": "plugin",
     "name": "strapi-media-webp-convertor",
-    "displayName": "Media WebP & migration",
+    "displayName": "Media WebP & Migration",
     "description": "WebP upload optimization, tunable quality, and S3 / URL migration helpers."
   },
   "name": "strapi-plugin-media-webp-convertor",
