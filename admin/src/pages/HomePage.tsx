@@ -288,22 +288,7 @@ const MigrationPanel = () => {
     ]
   );
 
-  const clearS3Secrets = () => {
-    setSourceAccessKeyId('');
-    setSourceSecretAccessKey('');
-    setDestAccessKeyId('');
-    setDestSecretAccessKey('');
-    setS3ConnectionOk(false);
-    setS3TestMessage(null);
-    setS3SourceObjectCount(null);
-    setS3SourceCountTruncated(false);
-    setS3CopiedSoFar(0);
-    setCursor(undefined);
-    setS3CopyRunning(false);
-    s3StopRef.current = false;
-  };
-
-  /** After a successful full copy: clear AWS keys from the form; keep counts + report for progress readout and CSV. */
+/** After a successful full copy: clear AWS keys from the form; keep counts + report for progress readout and CSV. */
   const clearS3CredentialFieldsAfterSuccess = useCallback(() => {
     setSourceAccessKeyId('');
     setSourceSecretAccessKey('');
@@ -1757,7 +1742,7 @@ const HomePage = () => {
   return (
     <Layouts.Root>
       <Layouts.Header
-        title="Media WebP & migration"
+        title="Media WebP & Migration"
         subtitle="Configure WebP encoding for uploads and run operator-controlled migration helpers."
       />
       <Layouts.Content>
