@@ -10,6 +10,8 @@ export const PLUGIN_ACTIONS = {
   migrationS3Copy: `plugin::${PLUGIN_NAME}.migration.batch-copy`,
   /** S3 batched delete route — kept separate so copy access does not imply destructive delete access. */
   migrationS3Delete: `plugin::${PLUGIN_NAME}.migration.batch-delete`,
+  /** Local → S3 migration; uid uses "cloud" instead of "s3" — digits are not allowed in action uids. */
+  migrationLocalS3: `plugin::${PLUGIN_NAME}.migration.local-to-cloud`,
   conversionList: `plugin::${PLUGIN_NAME}.conversion.list`,
   conversionConvert: `plugin::${PLUGIN_NAME}.conversion.convert`,
 } as const;
@@ -57,6 +59,13 @@ export const permissionActionDefinitions = [
   {
     uid: 'migration.batch-delete',
     displayName: 'Run batched S3 delete — permanently removes objects (ephemeral credentials)',
+    pluginName: PLUGIN_NAME,
+    section: 'plugins' as const,
+    subCategory: 'media',
+  },
+  {
+    uid: 'migration.local-to-cloud',
+    displayName: 'Migrate local files to S3 (uploads files and rewrites DB URLs)',
     pluginName: PLUGIN_NAME,
     section: 'plugins' as const,
     subCategory: 'media',
