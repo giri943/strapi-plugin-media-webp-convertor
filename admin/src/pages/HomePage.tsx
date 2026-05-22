@@ -1515,6 +1515,7 @@ const ConversionPanel = () => {
 
   const [msg, setMsg] = useState<string | null>(null);
   const [msgVariant, setMsgVariant] = useState<'success' | 'danger' | 'warning'>('success');
+  const [msgTitle, setMsgTitle] = useState<string | null>(null);
 
   const setFileStatus = (id: number, s: FileConvStatus) =>
     setFileStatuses((prev) => new Map([...prev, [id, s]]));
@@ -1599,6 +1600,7 @@ const ConversionPanel = () => {
     const toConvert = filesTotal;
     if (toConvert === 0) {
       setMsgVariant('success');
+      setMsgTitle(null);
       setMsg(searchQuery || mimeFilter ? 'No files match the current filters.' : 'All images are already in WebP format.');
       return;
     }
@@ -1619,9 +1621,11 @@ const ConversionPanel = () => {
     setBulkOriginalKB(0);
     setBulkTotal(toConvert);
     setMsg(null);
+    setMsgTitle(null);
     setFileStatuses(new Map());
 
     let localConverted = 0;
+    let localFailed = 0;
     let localSavedKB = 0;
     let localOriginalKB = 0;
 
@@ -1645,6 +1649,7 @@ const ConversionPanel = () => {
         const batch = allIds.slice(i, i + BATCH_SIZE);
         const r = await postConversionBatch({ fileIds: batch, quality: effectiveQuality, losslessMimes });
         localConverted += r.converted;
+        localFailed += r.failed;
         localSavedKB += r.savedKB;
         localOriginalKB += r.originalKB;
         setBulkConverted(localConverted);
@@ -1656,20 +1661,35 @@ const ConversionPanel = () => {
         }
       }
 
+      const savings = savingsSummary(localSavedKB, localOriginalKB);
+      const savingsSuffix = savings ? ` ${savings}.` : '';
+
       if (bulkStopRef.current) {
         setMsgVariant('warning');
-        const savings = savingsSummary(localSavedKB, localOriginalKB);
-        setMsg(`Stopped after converting ${localConverted.toLocaleString()} file(s).${savings ? ` ${savings}.` : ''} Run Convert All again to resume.`);
+        setMsgTitle('Stopped');
+        const failedSuffix = localFailed > 0 ? ` ${localFailed} failed.` : '';
+        setMsg(`Converted ${localConverted.toLocaleString()} file(s) before stopping.${failedSuffix}${savingsSuffix} Run Convert All again to resume.`);
       } else {
         setBulkDone(true);
-        setMsgVariant('success');
-        const savings = savingsSummary(localSavedKB, localOriginalKB);
-        setMsg(`Done — ${localConverted.toLocaleString()} file${localConverted === 1 ? '' : 's'} converted to WebP.${savings ? ` ${savings}.` : ''}`);
+        if (localConverted === 0 && localFailed > 0) {
+          setMsgVariant('danger');
+          setMsgTitle('Conversion failed');
+          setMsg(`${localFailed} file${localFailed === 1 ? '' : 's'} failed to convert. Hover the X Error tag on each row to see why.`);
+        } else if (localFailed > 0) {
+          setMsgVariant('warning');
+          setMsgTitle('Completed with errors');
+          setMsg(`${localConverted.toLocaleString()} file${localConverted === 1 ? '' : 's'} converted, ${localFailed} failed. Hover the X Error tag on each row to see why.${savingsSuffix}`);
+        } else {
+          setMsgVariant('success');
+          setMsgTitle('Done');
+          setMsg(`${localConverted.toLocaleString()} file${localConverted === 1 ? '' : 's'} converted to WebP.${savingsSuffix}`);
+        }
       }
       void loadStats();
       void loadFiles(filesPage, searchQuery, mimeFilter);
     } catch (e) {
       setMsgVariant('danger');
+      setMsgTitle('Error');
       setMsg(e instanceof Error ? e.message : 'Bulk conversion failed');
     } finally {
       setBulkRunning(false);
@@ -1800,10 +1820,10 @@ const ConversionPanel = () => {
 
           {msg && (
             <Alert
-              title={msgVariant === 'success' ? 'Done' : msgVariant === 'warning' ? 'Stopped' : 'Error'}
+              title={msgTitle ?? (msgVariant === 'success' ? 'Done' : msgVariant === 'warning' ? 'Stopped' : 'Error')}
               variant={msgVariant}
               closeLabel="Dismiss"
-              onClose={() => setMsg(null)}
+              onClose={() => { setMsg(null); setMsgTitle(null); }}
             >
               {msg}
             </Alert>
