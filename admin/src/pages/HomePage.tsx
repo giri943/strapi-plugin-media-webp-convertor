@@ -34,9 +34,17 @@ import {
 /*  Upload optimization tab                                            */
 /* ------------------------------------------------------------------ */
 
+/** Server clamps to the same range (see `services/settings.ts`); mirrored here for inline feedback. */
+const MIN_PDF_SIZE_MB = 1;
+const MAX_PDF_SIZE_MB = 500;
+
 const UploadOptimizationPanel = () => {
   const [quality, setQuality] = useState(82);
   const [enabled, setEnabled] = useState(true);
+  const [pdfValidation, setPdfValidation] = useState(true);
+  const [blockActiveContent, setBlockActiveContent] = useState(true);
+  /** Held as a string so the field can be cleared while typing; validated on save. */
+  const [maxPdfSize, setMaxPdfSize] = useState('25');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -49,6 +57,9 @@ const UploadOptimizationPanel = () => {
       const s = await getSettings();
       setQuality(s.webpQuality);
       setEnabled(s.webpConversionEnabled);
+      setPdfValidation(s.pdfValidationEnabled);
+      setMaxPdfSize(String(s.maxPdfSizeMb));
+      setBlockActiveContent(s.blockPdfActiveContent);
     } catch (e) {
       setMsgVariant('danger');
       setMsg(e instanceof Error ? e.message : 'Failed to load settings');
@@ -60,10 +71,23 @@ const UploadOptimizationPanel = () => {
   useEffect(() => { void load(); }, [load]);
 
   const save = async () => {
+    const parsedPdfSize = Number(maxPdfSize);
+    if (!Number.isFinite(parsedPdfSize) || parsedPdfSize < MIN_PDF_SIZE_MB || parsedPdfSize > MAX_PDF_SIZE_MB) {
+      setMsgVariant('danger');
+      setMsg(`Maximum PDF size must be between ${MIN_PDF_SIZE_MB} and ${MAX_PDF_SIZE_MB} MB.`);
+      return;
+    }
     setSaving(true);
     setMsg(null);
     try {
-      await putSettings({ webpQuality: quality, webpConversionEnabled: enabled });
+      const saved = await putSettings({
+        webpQuality: quality,
+        webpConversionEnabled: enabled,
+        pdfValidationEnabled: pdfValidation,
+        maxPdfSizeMb: parsedPdfSize,
+        blockPdfActiveContent: blockActiveContent,
+      });
+      setMaxPdfSize(String(saved.maxPdfSizeMb));
       setMsgVariant('success');
       setMsg('Settings saved.');
     } catch (e) {
@@ -117,6 +141,64 @@ const UploadOptimizationPanel = () => {
                 75–90 recommended. Higher = sharper but larger. Default 82.
               </Typography>
             </Box>
+          </Field.Root>
+        </Box>
+
+        <Divider />
+
+        <Box>
+          <Typography variant="delta" tag="h2">Document validation</Typography>
+          <Box paddingTop={1}>
+            <Typography variant="omega" textColor="neutral600">
+              PDF uploads are checked against their magic bytes — the file must start with the
+              <code> %PDF-</code> signature and end with the <code>%%EOF</code> trailer. Files disguised
+              as another type, and PDFs that are truncated or corrupt, are rejected before Strapi stores them.
+            </Typography>
+          </Box>
+        </Box>
+
+        <Checkbox
+          checked={pdfValidation}
+          onCheckedChange={(v: boolean | 'indeterminate') => setPdfValidation(v === true)}
+          disabled={loading || saving}
+        >
+          Validate PDF uploads
+        </Checkbox>
+
+        <Box>
+          <Checkbox
+            checked={blockActiveContent}
+            onCheckedChange={(v: boolean | 'indeterminate') => setBlockActiveContent(v === true)}
+            disabled={loading || saving || !pdfValidation}
+          >
+            Reject PDFs containing JavaScript or launch actions
+          </Checkbox>
+          <Box paddingTop={1}>
+            <Typography variant="pi" textColor="neutral500">
+              Covers compressed PDFs too. Interactive PDF forms that use scripts for field
+              validation will be rejected — untick this if you need to publish one.
+            </Typography>
+          </Box>
+        </Box>
+
+        <Box>
+          <Field.Root
+            name="maxPdfSizeMb"
+            hint={`Uploads larger than this are rejected. ${MIN_PDF_SIZE_MB}–${MAX_PDF_SIZE_MB} MB. Default 25.`}
+          >
+            <Field.Label>Maximum PDF size (MB)</Field.Label>
+            <Box style={{ maxWidth: 200 }}>
+              <Field.Input
+                type="number"
+                min={MIN_PDF_SIZE_MB}
+                max={MAX_PDF_SIZE_MB}
+                step={1}
+                value={maxPdfSize}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setMaxPdfSize(e.target.value)}
+                disabled={loading || saving || !pdfValidation}
+              />
+            </Box>
+            <Field.Hint />
           </Field.Root>
         </Box>
 

@@ -7,10 +7,19 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
   },
 
   async update(ctx: any) {
-    const body = ctx.request.body as { webpQuality?: number; webpConversionEnabled?: boolean };
+    const body = ctx.request.body as {
+      webpQuality?: number;
+      webpConversionEnabled?: boolean;
+      pdfValidationEnabled?: boolean;
+      maxPdfSizeMb?: number;
+      blockPdfActiveContent?: boolean;
+    };
     const data = await strapi.plugin('strapi-media-webp-convertor').service('settings').set({
       webpQuality: body.webpQuality,
       webpConversionEnabled: body.webpConversionEnabled,
+      pdfValidationEnabled: body.pdfValidationEnabled,
+      maxPdfSizeMb: body.maxPdfSizeMb,
+      blockPdfActiveContent: body.blockPdfActiveContent,
     });
     ctx.body = { data };
   },

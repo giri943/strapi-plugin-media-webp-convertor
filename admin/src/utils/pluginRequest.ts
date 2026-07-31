@@ -39,11 +39,19 @@ function unwrapError(e: unknown): string {
   return 'Request failed';
 }
 
-export async function getSettings() {
+export type PluginSettings = {
+  webpQuality: number;
+  webpConversionEnabled: boolean;
+  pdfValidationEnabled: boolean;
+  maxPdfSizeMb: number;
+  blockPdfActiveContent: boolean;
+};
+
+export async function getSettings(): Promise<PluginSettings> {
   const { get } = getFetchClient();
   try {
     const { data } = await get(`${basePath()}/settings`);
-    const body = data as { data?: { webpQuality: number; webpConversionEnabled: boolean } };
+    const body = data as { data?: PluginSettings };
     if (!body?.data) throw new Error('Invalid settings response');
     return body.data;
   } catch (e) {
@@ -51,11 +59,11 @@ export async function getSettings() {
   }
 }
 
-export async function putSettings(payload: { webpQuality?: number; webpConversionEnabled?: boolean }) {
+export async function putSettings(payload: Partial<PluginSettings>): Promise<PluginSettings> {
   const { put } = getFetchClient();
   try {
     const { data } = await put(`${basePath()}/settings`, payload);
-    const body = data as { data?: { webpQuality: number; webpConversionEnabled: boolean } };
+    const body = data as { data?: PluginSettings };
     if (!body?.data) throw new Error('Invalid settings response');
     return body.data;
   } catch (e) {

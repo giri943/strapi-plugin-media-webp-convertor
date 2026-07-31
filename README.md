@@ -45,6 +45,9 @@ That's it. Restart Strapi and uploads will start converting automatically. To tw
 |---|---|---|---|
 | `webpQuality` | `number` (1–100) | `82` | Lossy WebP quality. 75–90 is a good range for most use cases. |
 | `webpConversionEnabled` | `boolean` | `true` | Set to `false` to pause conversion without uninstalling the plugin. |
+| `pdfValidationEnabled` | `boolean` | `true` | Magic-byte validation of PDF uploads. Independent of `webpConversionEnabled`. |
+| `maxPdfSizeMb` | `number` (1–500) | `25` | PDF uploads above this size are rejected. |
+| `blockPdfActiveContent` | `boolean` | `true` | Reject PDFs containing JavaScript or `/Launch` actions. Requires `pdfValidationEnabled`. |
 
 These can also be changed live from the admin panel — no restart needed. Values are stored in the Strapi plugin store, not in `.env`.
 
@@ -56,8 +59,95 @@ These can also be changed live from the admin panel — no restart needed. Value
 |---|---|
 | JPEG, PNG, GIF, BMP, TIFF, HEIC/HEIF | Converted to lossy WebP |
 | WebP | Validated via magic bytes, passed through |
-| SVG | Scanned for scripts / event handlers / iframes, passed through |
+| SVG | Scanned for executable content, passed through if clean |
+| PDF | Validated via magic bytes (`%PDF-` header + `%%EOF` trailer) and size, passed through |
 | Everything else | Passed through unchanged |
+
+Validation of SVG and PDF uploads runs **regardless of `webpConversionEnabled`** — pausing the
+convertor does not reopen the door to scriptable uploads. A rejected upload returns `400` with the
+reason in `error.message`, which the admin panel shows in the upload notification.
+
+### PDF validation
+
+A file claiming to be a PDF — by mime type or `.pdf` extension — must prove it:
+
+- the `%PDF-` signature must appear within the first 1KB (byte 0 per spec, but leading junk that real readers tolerate is allowed),
+- the header version must be a real one (`1.0`–`1.7` or `2.0`),
+- the `%%EOF` trailer must appear in the last 2KB, which rejects truncated and corrupt uploads,
+- the file must be non-empty and within `maxPdfSizeMb`.
+
+The reverse is checked too: a file uploaded as an image whose bytes *start* with `%PDF-` is rejected as a type mismatch, so a PDF can't slip in disguised as a `.png`. Matching is anchored at byte 0 in this direction so images that merely mention the sequence in their metadata aren't flagged.
+
+### PDF active content
+
+A PDF can pass every signature check and still carry `/OpenAction → /S /JavaScript`, which runs
+when the document opens. With `blockPdfActiveContent` on (the default), a validated PDF is also
+scanned for:
+
+- a JavaScript action — `/S /JavaScript`
+- a document-level JavaScript name tree — `/Names << /JavaScript [ … ] >>`
+- a script payload — `/JS`
+- a `/Launch` action, which starts an external program
+
+Two design choices keep false positives down:
+
+- **Only object definitions are scanned, never page content streams.** An action dictionary can
+  only live in an object definition, so a document that merely *discusses* `/JavaScript` — a
+  security whitepaper, say — is not flagged.
+- **Constructs are matched, not keywords.** A bare `/OpenAction` is allowed, since it usually just
+  sets the initial zoom; it is only the JavaScript action it may point at that is refused.
+  `/URI` link actions are likewise untouched.
+
+`/ObjStm` object streams are inflated before scanning, so PDFs from modern producers — which
+compress their object definitions and would show nothing to a plain-text scan — are covered.
+Decompression is bounded (per-stream, total, and stream count), so a zip-bomb PDF is refused in
+milliseconds rather than allocated.
+
+Names are `#xx`-decoded before matching, since `/S /J#61vaScript` is the same action to a viewer.
+Stream boundaries are located by position in a single linear pass, which both keeps the scan O(n)
+and stops a malformed `stream\r` line ending from hiding the object that follows it. Files above
+64 MB are not scanned at all and are reported as inconclusive rather than loaded into memory.
+
+**Known limits, stated plainly:**
+
+- **Interactive PDF forms are rejected.** Acrobat forms commonly use JavaScript for field
+  validation and calculations. If you need to publish one, untick the setting.
+- **Encrypted PDFs cannot be scanned.** Their objects are ciphertext. Such a file is stored and a
+  warning is logged saying the scan was incomplete — it is not silently treated as clean.
+- **This is not malware scanning.** Keyword matching raises the bar; it does not guarantee safety,
+  and a determined attacker can hide a payload behind exotic filters. For real assurance, add an
+  AV scanner and serve media with `Content-Disposition: attachment` from an origin separate from
+  your admin panel.
+
+### SVG validation
+
+An SVG is an XML document the browser executes, so a "clean-looking" image can carry script. Each
+upload is scanned as raw text **and** as an entity-decoded copy — so `&#106;avascript:` is caught
+alongside the literal form — and refused when it contains any of:
+
+- `<script>`, including namespace-prefixed `<svg:script>`
+- embedded content: `<iframe>`, `<object>`, `<embed>`, `<foreignObject>`, `<applet>`, `<handler>`, `<audio>`, `<video>`, `<frame>`
+- SMIL animation: `<animate>`, `<animateTransform>`, `<animateMotion>`, `<set>` — these can rewrite `href` at runtime
+- external resources: `<link>`, `<meta>`, `<base>`, `<?xml-stylesheet?>`, `<use>` pointing outside the document
+- any `on*` event-handler attribute (matched generically, not from a fixed list)
+- `javascript:` / `vbscript:` URLs, including whitespace-obfuscated `java<TAB>script:`
+- `data:` URLs carrying executable content — `data:image/png;base64,…` stays allowed
+- CSS `@import`, `expression()`, `-moz-binding`
+- `<!ENTITY>` declarations (XXE)
+- gzipped `.svgz`, which cannot be text-scanned and is therefore refused outright
+
+Files are decoded the way a browser decodes them — UTF-8, UTF-16LE and UTF-16BE, with or without a
+byte-order mark — because the same payload saved as UTF-16 would otherwise scan as gibberish and
+pass. An SVG whose bytes cannot be interpreted at all is refused rather than assumed clean.
+
+Detection is by content as well as by extension, so an SVG renamed `.txt` is still scanned. The
+test is whether `<svg>` is the document's **root element**, so an HTML page or Markdown file that
+merely embeds an inline SVG example is left alone.
+
+Two consequences worth knowing:
+
+- **Animated SVGs are refused.** SMIL elements are blocked wholesale because `<set attributeName="href" to="javascript:…">` is a working XSS vector. Use CSS animation or a video format instead.
+- Validation reduces risk but is not a substitute for serving user media from a separate origin with `Content-Security-Policy` and `Content-Disposition: attachment`.
 
 ---
 
