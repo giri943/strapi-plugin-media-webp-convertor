@@ -3,19 +3,21 @@ import { readFile, writeFile } from 'fs/promises';
 import path from 'path';
 import sharp from 'sharp';
 import type { Core } from '@strapi/strapi';
+import { PLUGIN_NAME } from '../constants';
 import { scanPdfActiveContent } from './pdf-active-content';
 import { inspectPdfUpload, isPdfFile } from './pdf-validation';
-import { hasSvgSignature, isSvgFile, validateSvgFile } from './svg-validation';
+import { SVG_MIME_TYPES, hasSvgSignature, isSvgFile, validateSvgFile } from './svg-validation';
+import {
+  TYPE_SNIFF_BYTES,
+  readHeadBytes,
+  readWholeUpload,
+  type UploadFile,
+} from './upload-file';
 import { UploadRejectedError } from './upload-rejection';
 
-export interface UploadFile {
-  originalFilename: string;
-  filepath: string;
-  mimetype: string;
-  size: number;
-  buffer?: Buffer;
-  stream?: unknown;
-}
+export type { UploadFile };
+
+const LOG_PREFIX = `[${PLUGIN_NAME}]`;
 
 const IMAGE_MIME_TYPES = [
   'image/jpeg',
@@ -31,10 +33,21 @@ const IMAGE_MIME_TYPES = [
 ];
 
 const HEIC_HEIF_EXTENSIONS = /\.(heic|heif)$/i;
-const SVG_MIME_TYPES = ['image/svg+xml', 'application/svg+xml'];
 
 function isHeicHeifExtension(filename: string) {
   return HEIC_HEIF_EXTENSIONS.test(filename);
+}
+
+/**
+ * Sniff the declared type from the leading bytes. Only a few kilobytes are needed, so this must
+ * never read the whole upload — a large non-image would otherwise be loaded into memory in full
+ * just to discover it is not an image.
+ */
+async function detectMimeFromBytes(file: UploadFile): Promise<string | undefined> {
+  if (!file.buffer && !file.filepath) return undefined;
+  const head = await readHeadBytes(file, TYPE_SNIFF_BYTES);
+  const detected = await FileType.fromBuffer(head);
+  return detected?.mime;
 }
 
 export async function isImageFile(file: UploadFile): Promise<boolean> {
@@ -45,15 +58,12 @@ export async function isImageFile(file: UploadFile): Promise<boolean> {
     return true;
   }
   try {
-    let buffer: Buffer;
-    if (file.buffer) buffer = file.buffer;
-    else if (file.filepath) buffer = await readFile(file.filepath);
-    else return false;
-    const detected = await FileType.fromBuffer(buffer);
-    if (!detected?.mime) return false;
-    if (SVG_MIME_TYPES.includes(detected.mime) || IMAGE_MIME_TYPES.includes(detected.mime)) return true;
-    if (detected.mime === 'image/heif' || detected.mime === 'image/heic') return true;
-    return false;
+    const mime = await detectMimeFromBytes(file);
+    if (!mime) return false;
+    // An SVG that slipped past the earlier checks lands here so sharp can rasterise it, which
+    // discards any embedded script along with the XML.
+    if (SVG_MIME_TYPES.includes(mime) || IMAGE_MIME_TYPES.includes(mime)) return true;
+    return mime === 'image/heif' || mime === 'image/heic';
   } catch {
     return false;
   }
@@ -64,9 +74,7 @@ export function isWebPFile(file: UploadFile) {
 }
 
 export async function assertBufferIsWebP(file: UploadFile) {
-  const buffer = file.buffer ?? (await readFile(file.filepath));
-  const detected = await FileType.fromBuffer(buffer);
-  if (detected?.mime !== 'image/webp') {
+  if ((await detectMimeFromBytes(file)) !== 'image/webp') {
     throw new UploadRejectedError('File does not appear to be a valid WebP image.');
   }
 }
@@ -136,7 +144,7 @@ export function syncFileInfoNameWithMultipartFile(
         }
       }
     } catch (e) {
-      strapi.log.warn('[strapi-media-webp-convertor] fileInfo sync skipped', e);
+      strapi.log.warn(`${LOG_PREFIX} fileInfo sync skipped`, e);
     }
   }
 }
@@ -158,7 +166,7 @@ export async function convertRasterUploadToWebP(strapi: Core.Strapi, file: Uploa
     file.originalFilename = filenameWithWebpExtension(file.originalFilename);
     if (file.buffer !== undefined) file.buffer = webpBuffer;
   } catch (err) {
-    strapi.log.error('[strapi-media-webp-convertor] Sharp WebP conversion failed:', err);
+    strapi.log.error(`${LOG_PREFIX} Sharp WebP conversion failed:`, err);
     throw new UploadRejectedError('Could not process this image as WebP.');
   }
 }
@@ -170,7 +178,7 @@ export async function processUploadFiles(ctx: any, strapi: Core.Strapi) {
     pdfValidationEnabled,
     maxPdfSizeMb,
     blockPdfActiveContent,
-  } = await strapi.plugin('strapi-media-webp-convertor').service('settings').get();
+  } = await strapi.plugin(PLUGIN_NAME).service('settings').get();
 
   const files = ctx.request.files?.files;
   if (!files) return;
@@ -188,7 +196,7 @@ export async function processUploadFiles(ctx: any, strapi: Core.Strapi) {
         if (pdfCheck.outcome === 'invalid') {
           if (pdfCheck.diagnostic) {
             strapi.log.warn(
-              `[strapi-media-webp-convertor] "${file.originalFilename}" rejected — ${pdfCheck.diagnostic}`
+              `${LOG_PREFIX} "${file.originalFilename}" rejected — ${pdfCheck.diagnostic}`
             );
           }
           throw new UploadRejectedError(pdfCheck.errorMessage);
@@ -196,16 +204,16 @@ export async function processUploadFiles(ctx: any, strapi: Core.Strapi) {
         if (pdfCheck.outcome === 'valid') {
           // Only reached once the size limit has passed, so reading the whole file is bounded.
           if (blockPdfActiveContent) {
-            const scan = scanPdfActiveContent(file.buffer ?? (await readFile(file.filepath)));
+            const scan = await scanPdfActiveContent(await readWholeUpload(file));
             if (scan.outcome === 'blocked') {
               strapi.log.warn(
-                `[strapi-media-webp-convertor] "${file.originalFilename}" active content — ${scan.diagnostic}`
+                `${LOG_PREFIX} "${file.originalFilename}" active content — ${scan.diagnostic}`
               );
               throw new UploadRejectedError(scan.errorMessage);
             }
             if (scan.outcome === 'inconclusive') {
               strapi.log.warn(
-                `[strapi-media-webp-convertor] "${file.originalFilename}" stored, but the active-content scan was incomplete — ${scan.diagnostic}`
+                `${LOG_PREFIX} "${file.originalFilename}" stored, but the active-content scan was incomplete — ${scan.diagnostic}`
               );
             }
           }
@@ -246,10 +254,10 @@ export async function processUploadFiles(ctx: any, strapi: Core.Strapi) {
       // error level, and propagates so the middleware answers 500 with a generic message rather
       // than handing the uploader a raw internal error (which can carry temp-file paths).
       if (error instanceof UploadRejectedError) {
-        strapi.log.warn(`[strapi-media-webp-convertor] Upload refused — "${name}": ${error.message}`);
+        strapi.log.warn(`${LOG_PREFIX} Upload refused — "${name}": ${error.message}`);
         throw error;
       }
-      strapi.log.error(`[strapi-media-webp-convertor] Unexpected error processing "${name}"`, error);
+      strapi.log.error(`${LOG_PREFIX} Unexpected error processing "${name}"`, error);
       throw error;
     }
   }

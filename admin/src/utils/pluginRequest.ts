@@ -47,13 +47,29 @@ export type PluginSettings = {
   blockPdfActiveContent: boolean;
 };
 
-export async function getSettings(): Promise<PluginSettings> {
+/** Accepted ranges, supplied by the server so the form never validates against a stale copy. */
+export type SettingsLimits = {
+  minPdfSizeMb: number;
+  maxPdfSizeMb: number;
+  minWebpQuality: number;
+  maxWebpQuality: number;
+};
+
+const FALLBACK_LIMITS: SettingsLimits = {
+  minPdfSizeMb: 1,
+  maxPdfSizeMb: 500,
+  minWebpQuality: 1,
+  maxWebpQuality: 100,
+};
+
+export async function getSettings(): Promise<{ settings: PluginSettings; limits: SettingsLimits }> {
   const { get } = getFetchClient();
   try {
     const { data } = await get(`${basePath()}/settings`);
-    const body = data as { data?: PluginSettings };
+    const body = data as { data?: PluginSettings; meta?: { limits?: SettingsLimits } };
     if (!body?.data) throw new Error('Invalid settings response');
-    return body.data;
+    // Older server builds predate `meta.limits`.
+    return { settings: body.data, limits: body.meta?.limits ?? FALLBACK_LIMITS };
   } catch (e) {
     throw new Error(unwrapError(e));
   }

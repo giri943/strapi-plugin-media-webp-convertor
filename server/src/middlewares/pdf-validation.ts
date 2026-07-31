@@ -1,5 +1,4 @@
-import { open, stat } from 'fs/promises';
-import type { UploadFile } from './upload-transform-helpers';
+import { readHeadBytes, readTailBytes, resolveUploadSize, type UploadFile } from './upload-file';
 
 /**
  * Magic-byte validation for PDF uploads.
@@ -57,41 +56,6 @@ export function isPdfFile(file: UploadFile): boolean {
   return (file.originalFilename || '').toLowerCase().endsWith('.pdf');
 }
 
-/** First `length` bytes, without pulling a large upload into memory. */
-async function readHead(file: UploadFile, length: number): Promise<Buffer> {
-  if (file.buffer) return file.buffer.subarray(0, length);
-  const handle = await open(file.filepath, 'r');
-  try {
-    const buf = Buffer.alloc(length);
-    const { bytesRead } = await handle.read(buf, 0, length, 0);
-    return buf.subarray(0, bytesRead);
-  } finally {
-    await handle.close();
-  }
-}
-
-/** Last `length` bytes (or the whole file when it is shorter). */
-async function readTail(file: UploadFile, length: number): Promise<Buffer> {
-  if (file.buffer) return file.buffer.subarray(Math.max(0, file.buffer.length - length));
-  const handle = await open(file.filepath, 'r');
-  try {
-    const { size } = await handle.stat();
-    const readLength = Math.min(length, size);
-    if (readLength <= 0) return Buffer.alloc(0);
-    const buf = Buffer.alloc(readLength);
-    const { bytesRead } = await handle.read(buf, 0, readLength, size - readLength);
-    return buf.subarray(0, bytesRead);
-  } finally {
-    await handle.close();
-  }
-}
-
-async function resolveFileSize(file: UploadFile): Promise<number> {
-  if (typeof file.size === 'number' && file.size >= 0) return file.size;
-  if (file.buffer) return file.buffer.length;
-  return (await stat(file.filepath)).size;
-}
-
 function formatMb(bytes: number): string {
   const mb = bytes / (1024 * 1024);
   return Number.isInteger(mb) ? String(mb) : mb.toFixed(1);
@@ -106,7 +70,7 @@ function formatMb(bytes: number): string {
 export async function inspectPdfUpload(file: UploadFile, maxSizeBytes: number): Promise<PdfUploadCheck> {
   let head: Buffer;
   try {
-    head = await readHead(file, MAX_HEADER_SEARCH_BYTES);
+    head = await readHeadBytes(file, MAX_HEADER_SEARCH_BYTES);
   } catch {
     return { outcome: 'invalid', errorMessage: 'Unable to read the uploaded file for validation.' };
   }
@@ -127,7 +91,7 @@ export async function inspectPdfUpload(file: UploadFile, maxSizeBytes: number): 
   }
 
   try {
-    const size = await resolveFileSize(file);
+    const size = await resolveUploadSize(file);
     if (size === 0) {
       return { outcome: 'invalid', errorMessage: 'PDF file is empty.' };
     }
@@ -156,7 +120,7 @@ export async function inspectPdfUpload(file: UploadFile, maxSizeBytes: number): 
       };
     }
 
-    const tail = await readTail(file, TRAILER_SEARCH_BYTES);
+    const tail = await readTailBytes(file, TRAILER_SEARCH_BYTES);
     if (tail.indexOf(PDF_EOF_MARKER) === -1) {
       return {
         outcome: 'invalid',

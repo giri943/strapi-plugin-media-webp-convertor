@@ -1,12 +1,15 @@
 # strapi-plugin-media-webp-convertor
 
-If your Strapi project is serving JPEGs and PNGs, you're sending more bytes than you need to. This plugin fixes that — automatically on every upload, and retroactively for everything already in your media library.
+If your Strapi project is serving JPEGs and PNGs, you're sending more bytes than you need to. This plugin fixes that — automatically on every upload, and retroactively for everything already in your media library. It also refuses the uploads a media library shouldn't accept in the first place.
 
 **What it does:**
 
 - **Auto-converts uploads** — any JPEG, PNG, GIF, BMP, TIFF, or HEIC uploaded through Strapi gets converted to WebP before it hits storage. No changes to your content types or frontend needed.
 - **Converts existing images** — a built-in admin UI to bulk-convert everything already in your media library, with search, filtering, per-file progress, and a storage savings report.
+- **Validates uploads** — SVGs are scanned for script and other executable content; PDFs are checked against their magic bytes and, by default, refused if they carry JavaScript or launch actions. Rejections return a `400` with a readable reason.
 - **Migration helpers** — move your local uploads to S3, rewrite URL prefixes in the database, or copy and delete S3 objects across buckets.
+
+Everything is configurable from the admin panel, and every check can be switched off.
 
 ---
 
@@ -14,6 +17,37 @@ If your Strapi project is serving JPEGs and PNGs, you're sending more bytes than
 
 - Strapi **5.x**
 - Node **≥ 18**
+- `sharp` — already present in a standard Strapi install
+
+---
+
+## Upgrading from 1.0.x
+
+This release adds upload validation that is **on by default**, so files that previously uploaded
+without complaint may now be refused. Nothing silently changes your stored media — only new
+uploads are affected.
+
+Uploads that used to succeed and now fail:
+
+| Upload | Why | To allow it again |
+|---|---|---|
+| A PDF containing JavaScript or a `/Launch` action | `blockPdfActiveContent` | Untick **Reject PDFs containing JavaScript or launch actions** |
+| A file named `.pdf` that isn't one, or a truncated PDF | `pdfValidationEnabled` | Untick **Validate PDF uploads** |
+| A PDF larger than 25 MB | `maxPdfSizeMb` | Raise the limit (up to 500) |
+| An SVG containing script, event handlers, SMIL animation, or external references | SVG scanning | Not configurable — sanitise the file |
+| A `.svgz` (gzipped SVG) | Cannot be scanned | Upload it uncompressed |
+
+Two behaviour changes worth knowing:
+
+- **SVG and PDF validation no longer respect `webpConversionEnabled`.** Previously, turning off
+  conversion also turned off SVG scanning. Pausing the convertor must not reopen the door to
+  scriptable uploads, so the checks now run independently.
+- **Animated SVGs are refused.** SMIL elements are blocked wholesale because
+  `<set attributeName="href" to="javascript:…">` is a working XSS vector.
+
+If you need the old permissive behaviour while you audit your content, set
+`pdfValidationEnabled: false` and `blockPdfActiveContent: false`. SVG scanning has no off switch by
+design.
 
 ---
 
