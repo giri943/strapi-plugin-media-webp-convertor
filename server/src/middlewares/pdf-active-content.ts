@@ -1,3 +1,4 @@
+import { setImmediate as yieldToEventLoop } from 'timers/promises';
 import zlib from 'zlib';
 
 /**
@@ -6,7 +7,7 @@ import zlib from 'zlib';
  * This is content analysis, not signature checking: a file can pass every magic-byte test and
  * still carry `/OpenAction → /S /JavaScript`, which runs when the document is opened.
  *
- * Three decisions shape the implementation:
+ * Three decisions shape what is matched:
  *
  * 1. **Only object definitions are scanned, never stream bodies.** An action dictionary can only
  *    appear in an object definition; page-drawing commands cannot contain one. Scanning rendered
@@ -16,10 +17,14 @@ import zlib from 'zlib';
  * 3. **Names are decoded before matching.** PDF permits `#xx` hex escapes inside names, so
  *    `/S /J#61vaScript` is the same action to a viewer and must be the same to the scanner.
  *
- * Everything walks the file linearly with `indexOf`. An earlier lazy-regex version was
- * quadratic: a 2.4 MB file of repeated `obj` tokens with no stream keyword blocked the event
- * loop for ~16 seconds, and the budgets below never engaged because they only counted
- * decompressed streams.
+ * And three shape how it runs, because this sits on the request path:
+ *
+ * - Stream boundaries are found with `Buffer.indexOf` in a single linear pass. An earlier
+ *   lazy-regex version was quadratic — 2.4 MB of `obj` tokens blocked the event loop for ~16 s.
+ * - Only the object-definition gaps are converted to text, one at a time. The whole file is never
+ *   held as a string, so peak memory tracks the largest gap rather than the file.
+ * - Decompression is async and the loop yields between segments, so a large PDF cannot stall
+ *   other requests.
  */
 
 /** Bounds on decompression work — a small PDF can inflate to gigabytes (zip bomb). */
@@ -28,8 +33,8 @@ const MAX_INFLATED_BYTES_PER_STREAM = 4 * 1024 * 1024;
 const MAX_TOTAL_INFLATED_BYTES = 32 * 1024 * 1024;
 
 /**
- * Above this the file is not scanned at all. `maxPdfSizeMb` permits up to 500 MB, and scanning
- * holds latin1 copies of what it inspects; a bounded refusal beats a multi-gigabyte allocation.
+ * Above this the file is not scanned at all. `maxPdfSizeMb` permits up to 500 MB; a bounded
+ * refusal beats spending the request budget on a file that large.
  */
 const MAX_SCAN_BYTES = 64 * 1024 * 1024;
 
@@ -38,6 +43,8 @@ const DICT_LOOKBACK = 4096;
 
 const STREAM_KEYWORD = 'stream';
 const END_STREAM_KEYWORD = 'endstream';
+const CR = 0x0d;
+const LF = 0x0a;
 
 type ActiveContentRule = { pattern: RegExp; reason: string };
 
@@ -73,35 +80,43 @@ export type PdfActiveContentScan =
 
 type StreamRegion = { bodyStart: number; bodyEnd: number };
 
+function blocked(rule: ActiveContentRule, where: string): PdfActiveContentScan {
+  return {
+    outcome: 'blocked',
+    errorMessage: `PDF rejected: it contains ${rule.reason}. This can run code when the document is opened.`,
+    diagnostic: `matched ${rule.pattern} in ${where}`,
+  };
+}
+
 /**
- * Locate every stream body by position, in one linear pass.
+ * Locate every stream body by position, in one linear pass over the bytes.
  *
  * Occurrences of `stream` that are the tail of `endstream` are skipped: matching them would
  * anchor the body at the wrong place and swallow the object definitions that follow — which is
  * how a CR-only `stream\r` line ending previously hid a JavaScript action from the scan.
  * All three line endings after the keyword (`\r\n`, `\n`, `\r`) are accepted.
  */
-function findStreamRegions(text: string): { regions: StreamRegion[]; truncated: boolean } {
+function findStreamRegions(buf: Buffer): { regions: StreamRegion[]; truncated: boolean } {
   const regions: StreamRegion[] = [];
   let pos = 0;
 
   while (regions.length < MAX_STREAMS_INSPECTED) {
-    const keyword = text.indexOf(STREAM_KEYWORD, pos);
+    const keyword = buf.indexOf(STREAM_KEYWORD, pos, 'latin1');
     if (keyword === -1) return { regions, truncated: false };
 
-    if (keyword >= 3 && text.startsWith('end', keyword - 3)) {
+    if (keyword >= 3 && buf.toString('latin1', keyword - 3, keyword) === 'end') {
       pos = keyword + STREAM_KEYWORD.length;
       continue;
     }
 
     let bodyStart = keyword + STREAM_KEYWORD.length;
-    if (text[bodyStart] === '\r') bodyStart++;
-    if (text[bodyStart] === '\n') bodyStart++;
+    if (buf[bodyStart] === CR) bodyStart++;
+    if (buf[bodyStart] === LF) bodyStart++;
 
-    const bodyEnd = text.indexOf(END_STREAM_KEYWORD, bodyStart);
+    const bodyEnd = buf.indexOf(END_STREAM_KEYWORD, bodyStart, 'latin1');
     if (bodyEnd === -1) {
       // Unterminated stream: treat the remainder as body rather than scanning binary as text.
-      regions.push({ bodyStart, bodyEnd: text.length });
+      regions.push({ bodyStart, bodyEnd: buf.length });
       return { regions, truncated: false };
     }
 
@@ -109,7 +124,7 @@ function findStreamRegions(text: string): { regions: StreamRegion[]; truncated: 
     pos = bodyEnd + END_STREAM_KEYWORD.length;
   }
 
-  return { regions, truncated: text.indexOf(STREAM_KEYWORD, pos) !== -1 };
+  return { regions, truncated: buf.indexOf(STREAM_KEYWORD, pos, 'latin1') !== -1 };
 }
 
 /**
@@ -134,26 +149,23 @@ function matchRule(chunk: string): ActiveContentRule | null {
   return null;
 }
 
-/** Inflate a Flate stream, refusing to allocate more than the per-stream cap. */
-function tryInflate(bytes: Buffer): Buffer | null {
+/** Inflate a Flate stream off the event loop, refusing to allocate more than the per-stream cap. */
+function tryInflate(bytes: Buffer): Promise<Buffer | null> {
   const options = { maxOutputLength: MAX_INFLATED_BYTES_PER_STREAM };
-  try {
-    return zlib.inflateSync(bytes, options);
-  } catch {
-    // Some producers omit the zlib header.
-    try {
-      return zlib.inflateRawSync(bytes, options);
-    } catch {
-      return null;
-    }
-  }
+  return new Promise((resolve) => {
+    zlib.inflate(bytes, options, (err, out) => {
+      if (!err) return resolve(out);
+      // Some producers omit the zlib header.
+      zlib.inflateRaw(bytes, options, (rawErr, rawOut) => resolve(rawErr ? null : rawOut));
+    });
+  });
 }
 
 /**
  * Scan an already-validated PDF for executable active content.
  * `buffer` must be the whole file; callers gate this behind the size limit.
  */
-export function scanPdfActiveContent(buffer: Buffer): PdfActiveContentScan {
+export async function scanPdfActiveContent(buffer: Buffer): Promise<PdfActiveContentScan> {
   if (buffer.length > MAX_SCAN_BYTES) {
     return {
       outcome: 'inconclusive',
@@ -162,29 +174,21 @@ export function scanPdfActiveContent(buffer: Buffer): PdfActiveContentScan {
   }
 
   try {
-    // latin1 maps bytes 1:1, so string offsets stay aligned with the buffer.
-    const text = buffer.toString('latin1');
-    const { regions, truncated } = findStreamRegions(text);
+    const { regions, truncated } = findStreamRegions(buffer);
 
     let encrypted = false;
     let undecompressed = 0;
     let totalInflated = 0;
 
-    // Walk the gaps between stream bodies — the object definitions — one at a time, so peak
-    // memory tracks the largest segment rather than the whole file.
+    // Walk the gaps between stream bodies — the object definitions — converting one at a time.
     let cursor = 0;
     for (let i = 0; i <= regions.length; i++) {
-      const segmentEnd = i < regions.length ? regions[i].bodyStart : text.length;
+      const segmentEnd = i < regions.length ? regions[i].bodyStart : buffer.length;
+
       if (segmentEnd > cursor) {
-        const segment = text.slice(cursor, segmentEnd);
+        const segment = buffer.toString('latin1', cursor, segmentEnd);
         const hit = matchRule(segment);
-        if (hit) {
-          return {
-            outcome: 'blocked',
-            errorMessage: `PDF rejected: it contains ${hit.reason}. This can run code when the document is opened.`,
-            diagnostic: `matched ${hit.pattern} in an object definition`,
-          };
-        }
+        if (hit) return blocked(hit, 'an object definition');
         if (!encrypted && /\/Encrypt\b/.test(segment)) encrypted = true;
 
         // Only object streams hold object definitions; other streams are skipped by design.
@@ -192,24 +196,21 @@ export function scanPdfActiveContent(buffer: Buffer): PdfActiveContentScan {
           if (totalInflated >= MAX_TOTAL_INFLATED_BYTES) {
             undecompressed++;
           } else {
-            const inflated = tryInflate(buffer.subarray(regions[i].bodyStart, regions[i].bodyEnd));
+            const inflated = await tryInflate(buffer.subarray(regions[i].bodyStart, regions[i].bodyEnd));
             if (!inflated) {
               undecompressed++;
             } else {
               totalInflated += inflated.length;
               const objStmHit = matchRule(inflated.toString('latin1'));
-              if (objStmHit) {
-                return {
-                  outcome: 'blocked',
-                  errorMessage: `PDF rejected: it contains ${objStmHit.reason}. This can run code when the document is opened.`,
-                  diagnostic: `matched ${objStmHit.pattern} inside a compressed object stream`,
-                };
-              }
+              if (objStmHit) return blocked(objStmHit, 'a compressed object stream');
             }
           }
         }
       }
+
       if (i < regions.length) cursor = regions[i].bodyEnd;
+      // Keep the request loop responsive on files with many objects.
+      await yieldToEventLoop();
     }
 
     // `/Encrypt` means strings and streams are ciphertext, so a clean result proves nothing.

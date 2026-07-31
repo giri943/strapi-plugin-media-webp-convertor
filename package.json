@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "keywords": [
     "strapi",
     "strapi-plugin",
@@ -10,7 +10,14 @@
     "migration",
     "optimization",
     "webp-convertor",
-    "image-convertor"
+    "image-convertor",
+    "upload-validation",
+    "upload-security",
+    "magic-bytes",
+    "svg-sanitizer",
+    "svg-xss",
+    "pdf-validation",
+    "file-type-validation"
   ],
   "type": "commonjs",
   "engines": {

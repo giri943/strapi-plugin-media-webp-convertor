@@ -1,6 +1,5 @@
-import { open, readFile, stat } from 'fs/promises';
 import { decodeSvgText, startsWithSvgElement } from './svg-text';
-import type { UploadFile } from './upload-transform-helpers';
+import { readHeadBytes, readWholeUpload, resolveUploadSize, type UploadFile } from './upload-file';
 
 /**
  * Content security scanning for SVG uploads.
@@ -10,9 +9,10 @@ import type { UploadFile } from './upload-transform-helpers';
  * entity-decoded copy, so `&#106;avascript:` cannot smuggle a payload past a literal match.
  */
 
-export const MAX_SVG_FILE_SIZE = 5 * 1024 * 1024;
+const MAX_SVG_FILE_SIZE = 5 * 1024 * 1024;
 
-const SVG_MIME_TYPES = ['image/svg+xml', 'application/svg+xml', 'text/svg+xml'];
+/** Shared with `isImageFile` so the two never disagree about what counts as an SVG. */
+export const SVG_MIME_TYPES = ['image/svg+xml', 'application/svg+xml', 'text/svg+xml'];
 
 /** gzip magic — a `.svgz` is still executed by the browser but defeats text scanning. */
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
@@ -113,19 +113,7 @@ function decodeEntities(input: string): string {
  */
 export async function hasSvgSignature(file: UploadFile): Promise<boolean> {
   try {
-    let head: Buffer;
-    if (file.buffer) {
-      head = file.buffer.subarray(0, SNIFF_BYTES);
-    } else {
-      const handle = await open(file.filepath, 'r');
-      try {
-        const buf = Buffer.alloc(SNIFF_BYTES);
-        const { bytesRead } = await handle.read(buf, 0, SNIFF_BYTES, 0);
-        head = buf.subarray(0, bytesRead);
-      } finally {
-        await handle.close();
-      }
-    }
+    const head = await readHeadBytes(file, SNIFF_BYTES);
     return startsWithSvgElement(decodeSvgText(head).text);
   } catch {
     return false;
@@ -134,12 +122,7 @@ export async function hasSvgSignature(file: UploadFile): Promise<boolean> {
 
 export async function validateSvgFile(file: UploadFile): Promise<SvgValidationResult> {
   try {
-    const size =
-      typeof file.size === 'number' && file.size >= 0
-        ? file.size
-        : file.buffer
-          ? file.buffer.length
-          : (await stat(file.filepath)).size;
+    const size = await resolveUploadSize(file);
 
     if (size === 0) {
       return { outcome: 'invalid', errorMessage: 'SVG file is empty.' };
@@ -151,7 +134,8 @@ export async function validateSvgFile(file: UploadFile): Promise<SvgValidationRe
       };
     }
 
-    const raw = file.buffer ?? (await readFile(file.filepath));
+    // Bounded by MAX_SVG_FILE_SIZE above, so reading every byte is safe here.
+    const raw = await readWholeUpload(file);
 
     // A gzipped SVG renders in the browser but reads as binary noise here, so pattern
     // scanning would pass it blind. Refuse rather than accept something unscannable.

@@ -28,17 +28,21 @@ import {
   postConversionBatch,
   type ConversionStats,
   type ConversionFile,
+  type SettingsLimits,
 } from '../utils/pluginRequest';
 
 /* ------------------------------------------------------------------ */
 /*  Upload optimization tab                                            */
 /* ------------------------------------------------------------------ */
 
-/** Server clamps to the same range (see `services/settings.ts`); mirrored here for inline feedback. */
-const MIN_PDF_SIZE_MB = 1;
-const MAX_PDF_SIZE_MB = 500;
-
 const UploadOptimizationPanel = () => {
+  /** Ranges come from the server with the settings payload — never hardcoded here. */
+  const [limits, setLimits] = useState<SettingsLimits>({
+    minPdfSizeMb: 1,
+    maxPdfSizeMb: 500,
+    minWebpQuality: 1,
+    maxWebpQuality: 100,
+  });
   const [quality, setQuality] = useState(82);
   const [enabled, setEnabled] = useState(true);
   const [pdfValidation, setPdfValidation] = useState(true);
@@ -54,7 +58,8 @@ const UploadOptimizationPanel = () => {
     setLoading(true);
     setMsg(null);
     try {
-      const s = await getSettings();
+      const { settings: s, limits: l } = await getSettings();
+      setLimits(l);
       setQuality(s.webpQuality);
       setEnabled(s.webpConversionEnabled);
       setPdfValidation(s.pdfValidationEnabled);
@@ -72,9 +77,13 @@ const UploadOptimizationPanel = () => {
 
   const save = async () => {
     const parsedPdfSize = Number(maxPdfSize);
-    if (!Number.isFinite(parsedPdfSize) || parsedPdfSize < MIN_PDF_SIZE_MB || parsedPdfSize > MAX_PDF_SIZE_MB) {
+    if (
+      !Number.isFinite(parsedPdfSize) ||
+      parsedPdfSize < limits.minPdfSizeMb ||
+      parsedPdfSize > limits.maxPdfSizeMb
+    ) {
       setMsgVariant('danger');
-      setMsg(`Maximum PDF size must be between ${MIN_PDF_SIZE_MB} and ${MAX_PDF_SIZE_MB} MB.`);
+      setMsg(`Maximum PDF size must be between ${limits.minPdfSizeMb} and ${limits.maxPdfSizeMb} MB.`);
       return;
     }
     setSaving(true);
@@ -127,8 +136,8 @@ const UploadOptimizationPanel = () => {
             <Box paddingTop={2} style={{ maxWidth: 360 }}>
               <input
                 type="range"
-                min={1}
-                max={100}
+                min={limits.minWebpQuality}
+                max={limits.maxWebpQuality}
                 step={1}
                 value={quality}
                 disabled={loading || saving}
@@ -184,14 +193,14 @@ const UploadOptimizationPanel = () => {
         <Box>
           <Field.Root
             name="maxPdfSizeMb"
-            hint={`Uploads larger than this are rejected. ${MIN_PDF_SIZE_MB}–${MAX_PDF_SIZE_MB} MB. Default 25.`}
+            hint={`Uploads larger than this are rejected. ${limits.minPdfSizeMb}–${limits.maxPdfSizeMb} MB. Default 25.`}
           >
             <Field.Label>Maximum PDF size (MB)</Field.Label>
             <Box style={{ maxWidth: 200 }}>
               <Field.Input
                 type="number"
-                min={MIN_PDF_SIZE_MB}
-                max={MAX_PDF_SIZE_MB}
+                min={limits.minPdfSizeMb}
+                max={limits.maxPdfSizeMb}
                 step={1}
                 value={maxPdfSize}
                 onChange={(e: ChangeEvent<HTMLInputElement>) => setMaxPdfSize(e.target.value)}
@@ -1655,7 +1664,7 @@ const ConversionPanel = () => {
     void loadStats();
     void loadFiles(1);
     getSettings()
-      .then((s) => setSettingsQuality(s.webpQuality))
+      .then(({ settings }) => setSettingsQuality(settings.webpQuality))
       .catch(() => {});
   }, [loadStats, loadFiles]);
 

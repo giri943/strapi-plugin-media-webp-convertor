@@ -17,19 +17,27 @@ const DEFAULTS: PluginSettings = {
   blockPdfActiveContent: true,
 };
 
-export const MIN_PDF_SIZE_MB = 1;
-export const MAX_PDF_SIZE_MB = 500;
+/**
+ * Accepted ranges, served to the admin panel via the settings endpoint so the form and the
+ * server clamp cannot drift apart.
+ */
+export const SETTINGS_LIMITS = {
+  minPdfSizeMb: 1,
+  maxPdfSizeMb: 500,
+  minWebpQuality: 1,
+  maxWebpQuality: 100,
+} as const;
 
 function clampQuality(q: unknown): number {
   const n = typeof q === 'number' ? q : Number(q);
   if (Number.isNaN(n)) return DEFAULTS.webpQuality;
-  return Math.min(100, Math.max(1, Math.round(n)));
+  return Math.min(SETTINGS_LIMITS.maxWebpQuality, Math.max(SETTINGS_LIMITS.minWebpQuality, Math.round(n)));
 }
 
 function clampPdfSize(mb: unknown): number {
   const n = typeof mb === 'number' ? mb : Number(mb);
   if (Number.isNaN(n)) return DEFAULTS.maxPdfSizeMb;
-  return Math.min(MAX_PDF_SIZE_MB, Math.max(MIN_PDF_SIZE_MB, Math.round(n)));
+  return Math.min(SETTINGS_LIMITS.maxPdfSizeMb, Math.max(SETTINGS_LIMITS.minPdfSizeMb, Math.round(n)));
 }
 
 export default ({ strapi }: { strapi: Core.Strapi }) => {
