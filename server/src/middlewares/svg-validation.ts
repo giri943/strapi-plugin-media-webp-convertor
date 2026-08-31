@@ -27,7 +27,7 @@ type SvgRule = { pattern: RegExp; reason: string };
  * which parse identically but slip past a bare `<script` match.
  */
 const SVG_RULES: SvgRule[] = [
-  { pattern: /<\s*(?:[a-z0-9-]+:)?script\b/i, reason: 'a <script> element' },
+  { pattern: /<\s*(?:[a-z0-9-]+:)?script\b/i, reason: 'a script element' },
   {
     pattern: /<\s*(?:[a-z0-9-]+:)?(?:iframe|object|embed|applet|frame|frameset|foreignObject|handler|audio|video)\b/i,
     reason: 'an embedded-content element',
@@ -65,7 +65,7 @@ const SVG_RULES: SvgRule[] = [
   // would backtrack past it and flag the legitimate `href="#id"` form.
   {
     pattern: /<\s*(?:[a-z0-9-]+:)?use\b[^>]*?\b(?:xlink:)?href\s*=\s*(?:"[^#"]|'[^#']|[^\s>"'#])/i,
-    reason: 'a <use> element referencing an external document',
+    reason: 'a use element referencing an external document',
   },
 ];
 

@@ -1,5 +1,5 @@
 {
-  "version": "2.0.0",
+  "version": "2.1.0",
   "keywords": [
     "strapi",
     "strapi-plugin",
@@ -17,7 +17,10 @@
     "svg-sanitizer",
     "svg-xss",
     "pdf-validation",
-    "file-type-validation"
+    "file-type-validation",
+    "file-upload-security",
+    "malicious-file-upload",
+    "allowed-file-types"
   ],
   "type": "commonjs",
   "engines": {

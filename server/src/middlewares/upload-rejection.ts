@@ -14,6 +14,22 @@ export class UploadRejectedError extends Error {
   }
 }
 
+/**
+ * Make a rejection reason safe to render in the Strapi admin panel.
+ *
+ * The media library does not print `error.message` directly — it passes it through
+ * `formatMessage` as an ICU template (`upload.apiError.<message>`). ICU reads `<…>` as a tag and
+ * `{…}` as a placeholder, so a reason mentioning a `<script>` element made the upload card throw
+ * `UNCLOSED_TAG` and take the React tree down with it. The validators word their reasons in prose,
+ * and this is the backstop that keeps a future one from reintroducing the crash.
+ */
+export function toClientSafeMessage(message: string): string {
+  return message
+    .replace(/[<>{}]/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 /** Name check as well as `instanceof`, so a duplicated bundle can't misclassify a rejection. */
 export function isUploadRejectedError(error: unknown): error is UploadRejectedError {
   if (error instanceof UploadRejectedError) return true;

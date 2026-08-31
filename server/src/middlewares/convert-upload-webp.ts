@@ -1,6 +1,6 @@
 import type { Core } from '@strapi/strapi';
 import { isStrapiMultipartUpload, processUploadFiles } from './upload-transform-helpers';
-import { isUploadRejectedError } from './upload-rejection';
+import { isUploadRejectedError, toClientSafeMessage } from './upload-rejection';
 
 /**
  * Strapi plugin middleware: PDF + SVG validation, WebP normalization, and fileInfo name sync.
@@ -32,7 +32,9 @@ export default (_config: unknown, { strapi }: { strapi: Core.Strapi }) => {
         error: {
           status: ctx.status,
           name: rejected ? 'ValidationError' : 'ApplicationError',
-          message: rejected ? message : 'Upload processing failed.',
+          // Sanitised on the way out: the admin panel renders this through ICU, where `<` and `{`
+          // are syntax. Anything unexpected stays internal — only refusals get a reason at all.
+          message: rejected ? toClientSafeMessage(message) : 'Upload processing failed.',
           details: {},
         },
       };

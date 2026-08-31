@@ -6,10 +6,12 @@ If your Strapi project is serving JPEGs and PNGs, you're sending more bytes than
 
 - **Auto-converts uploads** — any JPEG, PNG, GIF, BMP, TIFF, or HEIC uploaded through Strapi gets converted to WebP before it hits storage. No changes to your content types or frontend needed.
 - **Converts existing images** — a built-in admin UI to bulk-convert everything already in your media library, with search, filtering, per-file progress, and a storage savings report.
+- **Refuses what shouldn't be stored** — a default-deny type policy: only allow-listed extensions are accepted, filenames carrying tricks like `virus.svg%00.png` or `shell.php.jpg` are rejected, and every upload's bytes must match the extension it claims. Executables, scripts and image/PHP polyglots are refused whatever they're called. Strapi does not do this on its own.
 - **Validates uploads** — SVGs are scanned for script and other executable content; PDFs are checked against their magic bytes and, by default, refused if they carry JavaScript or launch actions. Rejections return a `400` with a readable reason.
 - **Migration helpers** — move your local uploads to S3, rewrite URL prefixes in the database, or copy and delete S3 objects across buckets.
 
-Everything is configurable from the admin panel, and every check can be switched off.
+Everything is configurable from the admin panel, and every check can be switched off — though the
+panel will tell you when you've switched off something that matters.
 
 ---
 
@@ -51,6 +53,36 @@ design.
 
 ---
 
+## Upgrading from 2.0.x
+
+This release adds the [file type policy](#file-type-policy), **on by default**. Uploads are now
+default-deny: only the types on the allow-list are accepted, and the bytes must match the extension.
+Stored media is untouched — only new uploads are affected.
+
+Uploads that used to succeed and now fail:
+
+| Upload | Why | To allow it again |
+|---|---|---|
+| Any type not on the allow-list — `.exe`, `.zip`, `.txt`, `.doc`, `.xls`, `.ppt`, scripts | Extension allow-list | Tick the type in **File type policy**, if it is one the plugin can verify |
+| `invoice.svg.png`, `shell.php.jpg` and other double extensions | `blockMultipleExtensions` | Untick **Reject filenames carrying more than one extension** |
+| A filename containing `%00`, `..`, a path separator, or a text-direction override | Filename safety | Not configurable — rename the file |
+| A file whose content is not the format its extension claims | Content agreement | Not configurable — upload the real format |
+| A valid image with `<?php` appended | Polyglot detection | Not configurable — strip the payload |
+
+Before upgrading, check which types your editors actually publish:
+
+```sql
+SELECT ext, COUNT(*) FROM files GROUP BY ext ORDER BY COUNT(*) DESC;
+```
+
+Anything in that list that is not on the allow-list will stop uploading. Enable it in the admin
+panel, or leave it blocked deliberately.
+
+Legacy Office formats are the likeliest surprise: `.doc`, `.xls` and `.ppt` cannot be enabled,
+because they are OLE containers and OLE is rejected on sight. Re-save as `.docx` / `.xlsx` / `.pptx`.
+
+---
+
 ## Getting started
 
 ```bash
@@ -82,12 +114,105 @@ That's it. Restart Strapi and uploads will start converting automatically. To tw
 | `pdfValidationEnabled` | `boolean` | `true` | Magic-byte validation of PDF uploads. Independent of `webpConversionEnabled`. |
 | `maxPdfSizeMb` | `number` (1–500) | `25` | PDF uploads above this size are rejected. |
 | `blockPdfActiveContent` | `boolean` | `true` | Reject PDFs containing JavaScript or `/Launch` actions. Requires `pdfValidationEnabled`. |
+| `fileTypePolicyEnabled` | `boolean` | `true` | Default-deny type policy: filename checks, the extension allow-list, and extension ↔ content agreement. |
+| `allowedFileExtensions` | `string[]` | see below | Extensions accepted when the policy is on. Only extensions the plugin can content-verify are accepted here. |
+| `blockMultipleExtensions` | `boolean` | `true` | Reject names carrying a second file extension, like `invoice.svg.png`. Requires `fileTypePolicyEnabled`. |
+| `randomizeStoredFilenames` | `boolean` | `false` | Replace the stored basename with a random token, dropping the uploader's filename entirely. |
 
 These can also be changed live from the admin panel — no restart needed. Values are stored in the Strapi plugin store, not in `.env`.
 
 ---
 
+## File type policy
+
+Strapi does not restrict upload types on its own. Its `plugin::upload.security` block exists but is
+inert until you configure it, and even configured it trusts the extension when the content has no
+detectable signature — which means a PHP file sent as `shell.php.png` with
+`Content-Type: image/png` is accepted. So the plugin enforces its own default-deny policy, before
+core sees the request.
+
+Three gates, because each one alone is bypassable.
+
+**1. Filename safety.** The name is rejected — not repaired — when it contains an encoded control
+character or separator (`%00`, `%2e%2e`, `%2f`), a raw control character, a zero-width or
+text-direction override, a path separator, `..`, a reserved character, a leading dot, a trailing dot
+or space, a Windows device name, or no extension at all. The validated name is then written back
+onto the upload, so core parses the same string that was checked.
+
+`virus.svg%00.png` is the case worth spelling out. Multipart filenames are never URL-decoded, so
+those are three literal characters, not a null byte — Strapi's own null-byte check never fires, and
+`path.extname()` reports `.png`. Matching the literal form is what closes it.
+
+**2. Extension allow-list.** Anything not enabled is refused. Enabled by default:
+
+| Group | Extensions |
+|---|---|
+| Images | `jpg` `jpeg` `png` `gif` `webp` `avif` `bmp` `tif` `tiff` `heic` `heif` `svg` |
+| Documents | `pdf` `docx` `xlsx` `pptx` `csv` |
+| Video | `mp4` `webm` `mov` |
+| Audio | `mp3` `wav` `ogg` `m4a` |
+
+Also supported, off by default: `odt` `ods` `odp` `rtf` `txt` `m4v` `ogv` `oga` `aac` `flac`.
+
+Legacy `.doc` / `.xls` / `.ppt` and the macro-enabled `.docm` / `.xlsm` / `.pptm` family are not
+offered at all. They are OLE containers that can carry VBA macros, and the OLE container is on the
+signature denylist below — allowing the extension would contradict that. Save as `.docx` / `.xlsx` /
+`.pptx`.
+
+An extension can only be enabled if the plugin knows how to content-verify it. Listing something
+else in `allowedFileExtensions` fails at startup with a message naming the offender, rather than
+being dropped silently.
+
+**3. Content must match the extension.** The first 8KB are sniffed and the detected type has to be
+one the extension permits, so PNG bytes under a `.jpg` name are refused. Text formats (`svg`, `csv`,
+`txt`) have no signature to find, so for those the rule inverts: detecting *any* signature is itself
+the mismatch, which is what catches a renamed executable or PDF.
+
+Independently of the name, an upload is refused outright when its bytes are a Windows, Linux or
+macOS executable, a Java class, an OLE container, a cabinet, an Android or WebAssembly binary, a
+Windows shortcut, or a static library — and when its content starts with `#!`, `<%`, `<script`,
+`<html` or `<!doctype html`, or contains `<?php` anywhere in the sniff window. The last one is the
+image/PHP polyglot: a valid PNG with a webshell appended.
+
+`application/zip` is deliberately *not* on the signature denylist, because it is the real container
+of every `.docx` and `.odt`. Archives are controlled by the allow-list instead. The tradeoff is that
+a plain zip renamed `.docx` is accepted; it is inert unless something extracts it.
+
+### What a rejected upload is told
+
+Refusals return `400` with a reason that describes **the file**, never the check. So an uploader
+learns that `.sql` is not accepted, but not which extensions are — and that content did not match
+its extension, but not what the content was detected as. Reflecting the allow-list or the detected
+type back would hand a prober a map of the policy and a type oracle to test against.
+
+The full detail goes to the server log instead:
+
+```
+[strapi-media-webp-convertor] "report.sql" rejected — ".sql" is not in the allow-list [avif, bmp, csv, …]
+[strapi-media-webp-convertor] "image.jpg" rejected — detected "image/png", expected one of [image/jpeg]
+```
+
+Reasons are also written in prose rather than with markup. The media library renders `error.message`
+through `formatMessage`, where ICU treats `<…>` as a tag and `{…}` as a placeholder — a reason
+mentioning a `<script>` element used to throw `UNCLOSED_TAG` and break the upload card. Messages are
+stripped of those characters on the way out, so this cannot recur.
+
+### What this does not cover
+
+Storing uploads outside the web root and serving them without execute permission is real and worth
+doing, but it is provider and web-server configuration — your S3 bucket policy, CloudFront
+behaviour, or nginx `location` block. The plugin cannot reach it. When the upload provider is
+`local`, the plugin logs a reminder at startup that `public/uploads` sits inside the web root.
+
+Content scanning is signature and pattern based, not antivirus. If you need malware detection, put
+a scanner in front of the upload endpoint.
+
+---
+
 ## What happens to each file type on upload
+
+Every upload first passes the [file type policy](#file-type-policy) — filename checks, the extension
+allow-list, and extension ↔ content agreement. What happens after that depends on the type:
 
 | File type | What happens |
 |---|---|
@@ -95,11 +220,13 @@ These can also be changed live from the admin panel — no restart needed. Value
 | WebP | Validated via magic bytes, passed through |
 | SVG | Scanned for executable content, passed through if clean |
 | PDF | Validated via magic bytes (`%PDF-` header + `%%EOF` trailer) and size, passed through |
-| Everything else | Passed through unchanged |
+| Other allowed types (documents, video, audio) | Content verified against the extension, passed through |
+| Everything else | Rejected |
 
-Validation of SVG and PDF uploads runs **regardless of `webpConversionEnabled`** — pausing the
-convertor does not reopen the door to scriptable uploads. A rejected upload returns `400` with the
-reason in `error.message`, which the admin panel shows in the upload notification.
+Type and content validation runs **regardless of `webpConversionEnabled`** — pausing the convertor
+does not reopen the door to scriptable uploads. A rejected upload returns `400` with the reason in
+`error.message`, which the admin panel shows in the upload notification. The reason given to the
+uploader never includes internal detail; diagnostics go to the server log instead.
 
 ### PDF validation
 

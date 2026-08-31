@@ -4,6 +4,8 @@ import path from 'path';
 import sharp from 'sharp';
 import type { Core } from '@strapi/strapi';
 import { PLUGIN_NAME } from '../constants';
+import { applyFileTypePolicy } from './file-type-policy';
+import { checkUploadFilename, randomisedFilename } from './filename-safety';
 import { scanPdfActiveContent } from './pdf-active-content';
 import { inspectPdfUpload, isPdfFile } from './pdf-validation';
 import { SVG_MIME_TYPES, hasSvgSignature, isSvgFile, validateSvgFile } from './svg-validation';
@@ -171,14 +173,141 @@ export async function convertRasterUploadToWebP(strapi: Core.Strapi, file: Uploa
   }
 }
 
-export async function processUploadFiles(ctx: any, strapi: Core.Strapi) {
+type UploadSettings = {
+  webpConversionEnabled: boolean;
+  webpQuality: number;
+  pdfValidationEnabled: boolean;
+  maxPdfSizeMb: number;
+  blockPdfActiveContent: boolean;
+  fileTypePolicyEnabled: boolean;
+  allowedFileExtensions: string[];
+  blockMultipleExtensions: boolean;
+  randomizeStoredFilenames: boolean;
+};
+
+/**
+ * Default-deny gate: the filename must be safe and the bytes must be a type we permit.
+ *
+ * Runs before every other handler and independently of `webpConversionEnabled`, so pausing the
+ * convertor cannot reopen the door. The validated name is written back onto the file, which matters
+ * because Strapi core derives the extension from the name with `path.extname()` — validating one
+ * string and letting core parse a different one is how filename tricks survive.
+ */
+async function enforceUploadPolicy(
+  ctx: any,
+  strapi: Core.Strapi,
+  file: UploadFile,
+  fileIndex: number,
+  settings: UploadSettings
+) {
+  const nameCheck = checkUploadFilename(file.originalFilename);
+  if (nameCheck.outcome === 'invalid') {
+    if (nameCheck.diagnostic) {
+      strapi.log.warn(`${LOG_PREFIX} filename rejected — ${nameCheck.diagnostic}`);
+    }
+    throw new UploadRejectedError(nameCheck.errorMessage);
+  }
+
+  if (nameCheck.safeName !== file.originalFilename) {
+    file.originalFilename = nameCheck.safeName;
+    syncFileInfoNameWithMultipartFile(strapi, ctx, fileIndex, file);
+  }
+
+  const typeCheck = await applyFileTypePolicy(
+    file,
+    file.originalFilename,
+    settings.allowedFileExtensions,
+    { blockMultipleExtensions: settings.blockMultipleExtensions }
+  );
+  if (typeCheck.outcome === 'rejected') {
+    if (typeCheck.diagnostic) {
+      strapi.log.warn(
+        `${LOG_PREFIX} "${file.originalFilename}" rejected — ${typeCheck.diagnostic}`
+      );
+    }
+    throw new UploadRejectedError(typeCheck.errorMessage);
+  }
+}
+
+/**
+ * Validation and normalisation for a single upload: PDF checks, SVG scanning, WebP conversion.
+ * Returns early once a file has been fully handled by one of those paths.
+ */
+async function transformSingleUpload(
+  ctx: any,
+  strapi: Core.Strapi,
+  file: UploadFile,
+  fileIndex: number,
+  settings: UploadSettings
+) {
   const {
     webpConversionEnabled,
     webpQuality,
     pdfValidationEnabled,
     maxPdfSizeMb,
     blockPdfActiveContent,
-  } = await strapi.plugin(PLUGIN_NAME).service('settings').get();
+  } = settings;
+
+  if (pdfValidationEnabled) {
+    const pdfCheck = await inspectPdfUpload(file, maxPdfSizeMb * 1024 * 1024);
+    if (pdfCheck.outcome === 'invalid') {
+      if (pdfCheck.diagnostic) {
+        strapi.log.warn(`${LOG_PREFIX} "${file.originalFilename}" rejected — ${pdfCheck.diagnostic}`);
+      }
+      throw new UploadRejectedError(pdfCheck.errorMessage);
+    }
+    if (pdfCheck.outcome === 'valid') {
+      // Only reached once the size limit has passed, so reading the whole file is bounded.
+      if (blockPdfActiveContent) {
+        const scan = await scanPdfActiveContent(await readWholeUpload(file));
+        if (scan.outcome === 'blocked') {
+          strapi.log.warn(
+            `${LOG_PREFIX} "${file.originalFilename}" active content — ${scan.diagnostic}`
+          );
+          throw new UploadRejectedError(scan.errorMessage);
+        }
+        if (scan.outcome === 'inconclusive') {
+          strapi.log.warn(
+            `${LOG_PREFIX} "${file.originalFilename}" stored, but the active-content scan was incomplete — ${scan.diagnostic}`
+          );
+        }
+      }
+      // Bytes are confirmed, so a `.pdf` sent as octet-stream can be safely normalised.
+      file.mimetype = 'application/pdf';
+      return;
+    }
+  } else if (isPdfFile(file)) {
+    return;
+  }
+
+  // Content security scanning is never gated on `webpConversionEnabled` — pausing the
+  // convertor must not quietly re-open the door to scriptable uploads. Sniffing the bytes
+  // as well as the declared type catches an SVG renamed to slip past the extension check.
+  if (isSvgFile(file) || (await hasSvgSignature(file))) {
+    const svgCheck = await validateSvgFile(file);
+    if (svgCheck.outcome === 'invalid') {
+      throw new UploadRejectedError(svgCheck.errorMessage);
+    }
+    return;
+  }
+
+  if (!webpConversionEnabled) return;
+
+  if (await isImageFile(file)) {
+    if (isWebPFile(file)) {
+      await assertBufferIsWebP(file);
+    } else {
+      await convertRasterUploadToWebP(strapi, file, webpQuality);
+    }
+    syncFileInfoNameWithMultipartFile(strapi, ctx, fileIndex, file);
+  }
+}
+
+export async function processUploadFiles(ctx: any, strapi: Core.Strapi) {
+  const settings = (await strapi
+    .plugin(PLUGIN_NAME)
+    .service('settings')
+    .get()) as UploadSettings;
 
   const files = ctx.request.files?.files;
   if (!files) return;
@@ -191,59 +320,15 @@ export async function processUploadFiles(ctx: any, strapi: Core.Strapi) {
         throw new UploadRejectedError('Invalid file upload.');
       }
 
-      if (pdfValidationEnabled) {
-        const pdfCheck = await inspectPdfUpload(file, maxPdfSizeMb * 1024 * 1024);
-        if (pdfCheck.outcome === 'invalid') {
-          if (pdfCheck.diagnostic) {
-            strapi.log.warn(
-              `${LOG_PREFIX} "${file.originalFilename}" rejected — ${pdfCheck.diagnostic}`
-            );
-          }
-          throw new UploadRejectedError(pdfCheck.errorMessage);
-        }
-        if (pdfCheck.outcome === 'valid') {
-          // Only reached once the size limit has passed, so reading the whole file is bounded.
-          if (blockPdfActiveContent) {
-            const scan = await scanPdfActiveContent(await readWholeUpload(file));
-            if (scan.outcome === 'blocked') {
-              strapi.log.warn(
-                `${LOG_PREFIX} "${file.originalFilename}" active content — ${scan.diagnostic}`
-              );
-              throw new UploadRejectedError(scan.errorMessage);
-            }
-            if (scan.outcome === 'inconclusive') {
-              strapi.log.warn(
-                `${LOG_PREFIX} "${file.originalFilename}" stored, but the active-content scan was incomplete — ${scan.diagnostic}`
-              );
-            }
-          }
-          // Bytes are confirmed, so a `.pdf` sent as octet-stream can be safely normalised.
-          file.mimetype = 'application/pdf';
-          continue;
-        }
-      } else if (isPdfFile(file)) {
-        continue;
+      if (settings.fileTypePolicyEnabled) {
+        await enforceUploadPolicy(ctx, strapi, file, fileIndex, settings);
       }
 
-      // Content security scanning is never gated on `webpConversionEnabled` — pausing the
-      // convertor must not quietly re-open the door to scriptable uploads. Sniffing the bytes
-      // as well as the declared type catches an SVG renamed to slip past the extension check.
-      if (isSvgFile(file) || (await hasSvgSignature(file))) {
-        const svgCheck = await validateSvgFile(file);
-        if (svgCheck.outcome === 'invalid') {
-          throw new UploadRejectedError(svgCheck.errorMessage);
-        }
-        continue;
-      }
+      await transformSingleUpload(ctx, strapi, file, fileIndex, settings);
 
-      if (!webpConversionEnabled) continue;
-
-      if (await isImageFile(file)) {
-        if (isWebPFile(file)) {
-          await assertBufferIsWebP(file);
-        } else {
-          await convertRasterUploadToWebP(strapi, file, webpQuality);
-        }
+      // Last, so the extension is the final one — a JPEG that became a WebP is renamed as a WebP.
+      if (settings.randomizeStoredFilenames) {
+        file.originalFilename = randomisedFilename(file.originalFilename);
         syncFileInfoNameWithMultipartFile(strapi, ctx, fileIndex, file);
       }
     } catch (error) {

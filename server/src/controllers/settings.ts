@@ -17,6 +17,10 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
       pdfValidationEnabled?: boolean;
       maxPdfSizeMb?: number;
       blockPdfActiveContent?: boolean;
+      fileTypePolicyEnabled?: boolean;
+      allowedFileExtensions?: string[];
+      blockMultipleExtensions?: boolean;
+      randomizeStoredFilenames?: boolean;
     };
     const data = await strapi.plugin(PLUGIN_NAME).service('settings').set({
       webpQuality: body.webpQuality,
@@ -24,6 +28,10 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
       pdfValidationEnabled: body.pdfValidationEnabled,
       maxPdfSizeMb: body.maxPdfSizeMb,
       blockPdfActiveContent: body.blockPdfActiveContent,
+      fileTypePolicyEnabled: body.fileTypePolicyEnabled,
+      allowedFileExtensions: body.allowedFileExtensions,
+      blockMultipleExtensions: body.blockMultipleExtensions,
+      randomizeStoredFilenames: body.randomizeStoredFilenames,
     });
     ctx.body = { data };
   },

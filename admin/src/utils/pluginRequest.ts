@@ -45,6 +45,16 @@ export type PluginSettings = {
   pdfValidationEnabled: boolean;
   maxPdfSizeMb: number;
   blockPdfActiveContent: boolean;
+  fileTypePolicyEnabled: boolean;
+  allowedFileExtensions: string[];
+  blockMultipleExtensions: boolean;
+  randomizeStoredFilenames: boolean;
+};
+
+export type SupportedExtensionGroup = {
+  group: 'image' | 'document' | 'video' | 'audio';
+  label: string;
+  extensions: string[];
 };
 
 /** Accepted ranges, supplied by the server so the form never validates against a stale copy. */
@@ -53,6 +63,10 @@ export type SettingsLimits = {
   maxPdfSizeMb: number;
   minWebpQuality: number;
   maxWebpQuality: number;
+  /** Every extension the server can content-verify. The allow-list cannot exceed this. */
+  supportedFileExtensions: string[];
+  supportedFileExtensionGroups: SupportedExtensionGroup[];
+  defaultFileExtensions: string[];
 };
 
 const FALLBACK_LIMITS: SettingsLimits = {
@@ -60,16 +74,20 @@ const FALLBACK_LIMITS: SettingsLimits = {
   maxPdfSizeMb: 500,
   minWebpQuality: 1,
   maxWebpQuality: 100,
+  supportedFileExtensions: [],
+  supportedFileExtensionGroups: [],
+  defaultFileExtensions: [],
 };
 
 export async function getSettings(): Promise<{ settings: PluginSettings; limits: SettingsLimits }> {
   const { get } = getFetchClient();
   try {
     const { data } = await get(`${basePath()}/settings`);
-    const body = data as { data?: PluginSettings; meta?: { limits?: SettingsLimits } };
+    const body = data as { data?: PluginSettings; meta?: { limits?: Partial<SettingsLimits> } };
     if (!body?.data) throw new Error('Invalid settings response');
-    // Older server builds predate `meta.limits`.
-    return { settings: body.data, limits: body.meta?.limits ?? FALLBACK_LIMITS };
+    // Merged rather than substituted: older server builds predate `meta.limits` entirely, and
+    // builds between then and the file-type policy send it without the extension fields.
+    return { settings: body.data, limits: { ...FALLBACK_LIMITS, ...(body.meta?.limits ?? {}) } };
   } catch (e) {
     throw new Error(unwrapError(e));
   }
