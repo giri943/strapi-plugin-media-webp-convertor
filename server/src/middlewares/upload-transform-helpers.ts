@@ -1,50 +1,25 @@
-import { errors } from '@strapi/utils';
 import FileType from 'file-type';
-import { readFile, stat, writeFile } from 'fs/promises';
+import { readFile, writeFile } from 'fs/promises';
 import path from 'path';
 import sharp from 'sharp';
 import type { Core } from '@strapi/strapi';
+import { PLUGIN_NAME } from '../constants';
+import { applyFileTypePolicy } from './file-type-policy';
+import { checkUploadFilename, randomisedFilename } from './filename-safety';
+import { scanPdfActiveContent } from './pdf-active-content';
+import { inspectPdfUpload, isPdfFile } from './pdf-validation';
+import { SVG_MIME_TYPES, hasSvgSignature, isSvgFile, validateSvgFile } from './svg-validation';
+import {
+  TYPE_SNIFF_BYTES,
+  readHeadBytes,
+  readWholeUpload,
+  type UploadFile,
+} from './upload-file';
+import { UploadRejectedError } from './upload-rejection';
 
-const { ApplicationError } = errors;
+export type { UploadFile };
 
-export interface UploadFile {
-  originalFilename: string;
-  filepath: string;
-  mimetype: string;
-  size: number;
-  buffer?: Buffer;
-  stream?: unknown;
-}
-
-const DANGEROUS_SVG_PATTERNS = [
-  /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/i,
-  /javascript:/i,
-  /vbscript:/i,
-  /onload\s*=/i,
-  /onclick\s*=/i,
-  /onmouseover\s*=/i,
-  /onerror\s*=/i,
-  /onmouseout\s*=/i,
-  /onkeydown\s*=/i,
-  /onkeyup\s*=/i,
-  /onkeypress\s*=/i,
-  /onfocus\s*=/i,
-  /onblur\s*=/i,
-  /onchange\s*=/i,
-  /onsubmit\s*=/i,
-  /onreset\s*=/i,
-  /onselect\s*=/i,
-  /onunload\s*=/i,
-  /<iframe\b/i,
-  /<object\b/i,
-  /<embed\b/i,
-  /<link\b/i,
-  /<meta\b/i,
-  /xlink:href\s*=\s*["']javascript:/i,
-  /href\s*=\s*["']javascript:/i,
-  /data:text\/html/i,
-  /data:image\/svg\+xml.*base64.*script/i,
-];
+const LOG_PREFIX = `[${PLUGIN_NAME}]`;
 
 const IMAGE_MIME_TYPES = [
   'image/jpeg',
@@ -60,51 +35,21 @@ const IMAGE_MIME_TYPES = [
 ];
 
 const HEIC_HEIF_EXTENSIONS = /\.(heic|heif)$/i;
-const SVG_MIME_TYPES = ['image/svg+xml', 'application/svg+xml'];
-
-const SUSPICIOUS_ELEMENT_PATTERNS = [
-  /<script\b/i,
-  /<iframe\b/i,
-  /<object\b/i,
-  /<embed\b/i,
-  /<foreignObject\b/i,
-  /<animation\b/i,
-  /<set\b/i,
-  /<animateTransform\b/i,
-];
-
-const MAX_SVG_FILE_SIZE = 5 * 1024 * 1024;
-
-async function validateSVGSecurity(filePath: string, fileSize?: number) {
-  try {
-    if (fileSize && fileSize > MAX_SVG_FILE_SIZE) {
-      return { isValid: false, errorMessage: `SVG file is too large. Maximum is ${MAX_SVG_FILE_SIZE / (1024 * 1024)}MB.` };
-    }
-    if (!fileSize) {
-      const stats = await stat(filePath);
-      if (stats.size > MAX_SVG_FILE_SIZE) {
-        return { isValid: false, errorMessage: `SVG file is too large. Maximum is ${MAX_SVG_FILE_SIZE / (1024 * 1024)}MB.` };
-      }
-    }
-    const svgContent = await readFile(filePath, 'utf-8');
-    for (const pattern of DANGEROUS_SVG_PATTERNS) {
-      if (pattern.test(svgContent)) {
-        return { isValid: false, errorMessage: 'SVG contains potentially unsafe content.' };
-      }
-    }
-    for (const pattern of SUSPICIOUS_ELEMENT_PATTERNS) {
-      if (pattern.test(svgContent)) {
-        return { isValid: false, errorMessage: 'SVG contains disallowed elements.' };
-      }
-    }
-    return { isValid: true };
-  } catch {
-    return { isValid: false, errorMessage: 'Unable to validate SVG.' };
-  }
-}
 
 function isHeicHeifExtension(filename: string) {
   return HEIC_HEIF_EXTENSIONS.test(filename);
+}
+
+/**
+ * Sniff the declared type from the leading bytes. Only a few kilobytes are needed, so this must
+ * never read the whole upload — a large non-image would otherwise be loaded into memory in full
+ * just to discover it is not an image.
+ */
+async function detectMimeFromBytes(file: UploadFile): Promise<string | undefined> {
+  if (!file.buffer && !file.filepath) return undefined;
+  const head = await readHeadBytes(file, TYPE_SNIFF_BYTES);
+  const detected = await FileType.fromBuffer(head);
+  return detected?.mime;
 }
 
 export async function isImageFile(file: UploadFile): Promise<boolean> {
@@ -115,15 +60,12 @@ export async function isImageFile(file: UploadFile): Promise<boolean> {
     return true;
   }
   try {
-    let buffer: Buffer;
-    if (file.buffer) buffer = file.buffer;
-    else if (file.filepath) buffer = await readFile(file.filepath);
-    else return false;
-    const detected = await FileType.fromBuffer(buffer);
-    if (!detected?.mime) return false;
-    if (SVG_MIME_TYPES.includes(detected.mime) || IMAGE_MIME_TYPES.includes(detected.mime)) return true;
-    if (detected.mime === 'image/heif' || detected.mime === 'image/heic') return true;
-    return false;
+    const mime = await detectMimeFromBytes(file);
+    if (!mime) return false;
+    // An SVG that slipped past the earlier checks lands here so sharp can rasterise it, which
+    // discards any embedded script along with the XML.
+    if (SVG_MIME_TYPES.includes(mime) || IMAGE_MIME_TYPES.includes(mime)) return true;
+    return mime === 'image/heif' || mime === 'image/heic';
   } catch {
     return false;
   }
@@ -133,15 +75,9 @@ export function isWebPFile(file: UploadFile) {
   return file.mimetype === 'image/webp' || file.originalFilename.toLowerCase().endsWith('.webp');
 }
 
-export function isSVGFile(file: UploadFile) {
-  return SVG_MIME_TYPES.includes(file.mimetype) || file.originalFilename.toLowerCase().endsWith('.svg');
-}
-
 export async function assertBufferIsWebP(file: UploadFile) {
-  const buffer = file.buffer ?? (await readFile(file.filepath));
-  const detected = await FileType.fromBuffer(buffer);
-  if (detected?.mime !== 'image/webp') {
-    throw new ApplicationError('File does not appear to be a valid WebP image.');
+  if ((await detectMimeFromBytes(file)) !== 'image/webp') {
+    throw new UploadRejectedError('File does not appear to be a valid WebP image.');
   }
 }
 
@@ -210,7 +146,7 @@ export function syncFileInfoNameWithMultipartFile(
         }
       }
     } catch (e) {
-      strapi.log.warn('[strapi-media-webp-convertor] fileInfo sync skipped', e);
+      strapi.log.warn(`${LOG_PREFIX} fileInfo sync skipped`, e);
     }
   }
 }
@@ -232,18 +168,146 @@ export async function convertRasterUploadToWebP(strapi: Core.Strapi, file: Uploa
     file.originalFilename = filenameWithWebpExtension(file.originalFilename);
     if (file.buffer !== undefined) file.buffer = webpBuffer;
   } catch (err) {
-    strapi.log.error('[strapi-media-webp-convertor] Sharp WebP conversion failed:', err);
-    throw new ApplicationError('Could not process this image as WebP.');
+    strapi.log.error(`${LOG_PREFIX} Sharp WebP conversion failed:`, err);
+    throw new UploadRejectedError('Could not process this image as WebP.');
+  }
+}
+
+type UploadSettings = {
+  webpConversionEnabled: boolean;
+  webpQuality: number;
+  pdfValidationEnabled: boolean;
+  maxPdfSizeMb: number;
+  blockPdfActiveContent: boolean;
+  fileTypePolicyEnabled: boolean;
+  allowedFileExtensions: string[];
+  blockMultipleExtensions: boolean;
+  randomizeStoredFilenames: boolean;
+};
+
+/**
+ * Default-deny gate: the filename must be safe and the bytes must be a type we permit.
+ *
+ * Runs before every other handler and independently of `webpConversionEnabled`, so pausing the
+ * convertor cannot reopen the door. The validated name is written back onto the file, which matters
+ * because Strapi core derives the extension from the name with `path.extname()` — validating one
+ * string and letting core parse a different one is how filename tricks survive.
+ */
+async function enforceUploadPolicy(
+  ctx: any,
+  strapi: Core.Strapi,
+  file: UploadFile,
+  fileIndex: number,
+  settings: UploadSettings
+) {
+  const nameCheck = checkUploadFilename(file.originalFilename);
+  if (nameCheck.outcome === 'invalid') {
+    if (nameCheck.diagnostic) {
+      strapi.log.warn(`${LOG_PREFIX} filename rejected — ${nameCheck.diagnostic}`);
+    }
+    throw new UploadRejectedError(nameCheck.errorMessage);
+  }
+
+  if (nameCheck.safeName !== file.originalFilename) {
+    file.originalFilename = nameCheck.safeName;
+    syncFileInfoNameWithMultipartFile(strapi, ctx, fileIndex, file);
+  }
+
+  const typeCheck = await applyFileTypePolicy(
+    file,
+    file.originalFilename,
+    settings.allowedFileExtensions,
+    { blockMultipleExtensions: settings.blockMultipleExtensions }
+  );
+  if (typeCheck.outcome === 'rejected') {
+    if (typeCheck.diagnostic) {
+      strapi.log.warn(
+        `${LOG_PREFIX} "${file.originalFilename}" rejected — ${typeCheck.diagnostic}`
+      );
+    }
+    throw new UploadRejectedError(typeCheck.errorMessage);
+  }
+}
+
+/**
+ * Validation and normalisation for a single upload: PDF checks, SVG scanning, WebP conversion.
+ * Returns early once a file has been fully handled by one of those paths.
+ */
+async function transformSingleUpload(
+  ctx: any,
+  strapi: Core.Strapi,
+  file: UploadFile,
+  fileIndex: number,
+  settings: UploadSettings
+) {
+  const {
+    webpConversionEnabled,
+    webpQuality,
+    pdfValidationEnabled,
+    maxPdfSizeMb,
+    blockPdfActiveContent,
+  } = settings;
+
+  if (pdfValidationEnabled) {
+    const pdfCheck = await inspectPdfUpload(file, maxPdfSizeMb * 1024 * 1024);
+    if (pdfCheck.outcome === 'invalid') {
+      if (pdfCheck.diagnostic) {
+        strapi.log.warn(`${LOG_PREFIX} "${file.originalFilename}" rejected — ${pdfCheck.diagnostic}`);
+      }
+      throw new UploadRejectedError(pdfCheck.errorMessage);
+    }
+    if (pdfCheck.outcome === 'valid') {
+      // Only reached once the size limit has passed, so reading the whole file is bounded.
+      if (blockPdfActiveContent) {
+        const scan = await scanPdfActiveContent(await readWholeUpload(file));
+        if (scan.outcome === 'blocked') {
+          strapi.log.warn(
+            `${LOG_PREFIX} "${file.originalFilename}" active content — ${scan.diagnostic}`
+          );
+          throw new UploadRejectedError(scan.errorMessage);
+        }
+        if (scan.outcome === 'inconclusive') {
+          strapi.log.warn(
+            `${LOG_PREFIX} "${file.originalFilename}" stored, but the active-content scan was incomplete — ${scan.diagnostic}`
+          );
+        }
+      }
+      // Bytes are confirmed, so a `.pdf` sent as octet-stream can be safely normalised.
+      file.mimetype = 'application/pdf';
+      return;
+    }
+  } else if (isPdfFile(file)) {
+    return;
+  }
+
+  // Content security scanning is never gated on `webpConversionEnabled` — pausing the
+  // convertor must not quietly re-open the door to scriptable uploads. Sniffing the bytes
+  // as well as the declared type catches an SVG renamed to slip past the extension check.
+  if (isSvgFile(file) || (await hasSvgSignature(file))) {
+    const svgCheck = await validateSvgFile(file);
+    if (svgCheck.outcome === 'invalid') {
+      throw new UploadRejectedError(svgCheck.errorMessage);
+    }
+    return;
+  }
+
+  if (!webpConversionEnabled) return;
+
+  if (await isImageFile(file)) {
+    if (isWebPFile(file)) {
+      await assertBufferIsWebP(file);
+    } else {
+      await convertRasterUploadToWebP(strapi, file, webpQuality);
+    }
+    syncFileInfoNameWithMultipartFile(strapi, ctx, fileIndex, file);
   }
 }
 
 export async function processUploadFiles(ctx: any, strapi: Core.Strapi) {
-  const { webpConversionEnabled, webpQuality } = await strapi
-    .plugin('strapi-media-webp-convertor')
+  const settings = (await strapi
+    .plugin(PLUGIN_NAME)
     .service('settings')
-    .get();
-
-  if (!webpConversionEnabled) return;
+    .get()) as UploadSettings;
 
   const files = ctx.request.files?.files;
   if (!files) return;
@@ -253,30 +317,33 @@ export async function processUploadFiles(ctx: any, strapi: Core.Strapi) {
     const file = filesToProcess[fileIndex] as UploadFile;
     try {
       if (!file?.filepath || !file?.originalFilename) {
-        throw new ApplicationError('Invalid file upload.');
+        throw new UploadRejectedError('Invalid file upload.');
       }
-      const isImage = await isImageFile(file);
-      const isSvg = isSVGFile(file);
-      if (isSvg) {
-        const validationResult = await validateSVGSecurity(file.filepath, file.size);
-        if (!validationResult.isValid) {
-          throw new ApplicationError(validationResult.errorMessage || 'SVG validation failed');
-        }
-      } else if (isImage) {
-        if (isWebPFile(file)) {
-          await assertBufferIsWebP(file);
-        } else {
-          await convertRasterUploadToWebP(strapi, file, webpQuality);
-        }
+
+      if (settings.fileTypePolicyEnabled) {
+        await enforceUploadPolicy(ctx, strapi, file, fileIndex, settings);
+      }
+
+      await transformSingleUpload(ctx, strapi, file, fileIndex, settings);
+
+      // Last, so the extension is the final one — a JPEG that became a WebP is renamed as a WebP.
+      if (settings.randomizeStoredFilenames) {
+        file.originalFilename = randomisedFilename(file.originalFilename);
         syncFileInfoNameWithMultipartFile(strapi, ctx, fileIndex, file);
       }
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      strapi.log.error(
-        `[strapi-media-webp-convertor] File "${file?.originalFilename || 'unknown'}": ${msg}`
-      );
-      if (error instanceof ApplicationError) throw error;
-      throw new ApplicationError(msg || 'Upload processing failed');
+      const name = file?.originalFilename || 'unknown';
+
+      // A refusal is expected behaviour: log it as such and let the middleware return 400 with
+      // the reason. Anything else is a fault on our side — it keeps its stack, is logged at
+      // error level, and propagates so the middleware answers 500 with a generic message rather
+      // than handing the uploader a raw internal error (which can carry temp-file paths).
+      if (error instanceof UploadRejectedError) {
+        strapi.log.warn(`${LOG_PREFIX} Upload refused — "${name}": ${error.message}`);
+        throw error;
+      }
+      strapi.log.error(`${LOG_PREFIX} Unexpected error processing "${name}"`, error);
+      throw error;
     }
   }
 }

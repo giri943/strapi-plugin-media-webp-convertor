@@ -140,3 +140,11 @@ yarn-error.log
 ############################
 
 coverage
+
+
+############################
+# Editor / tool local state
+############################
+
+# Claude Code's per-machine session state (permission cache, etc.)
+.claude/

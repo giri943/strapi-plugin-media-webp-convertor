@@ -39,23 +39,65 @@ function unwrapError(e: unknown): string {
   return 'Request failed';
 }
 
-export async function getSettings() {
+export type PluginSettings = {
+  webpQuality: number;
+  webpConversionEnabled: boolean;
+  pdfValidationEnabled: boolean;
+  maxPdfSizeMb: number;
+  blockPdfActiveContent: boolean;
+  fileTypePolicyEnabled: boolean;
+  allowedFileExtensions: string[];
+  blockMultipleExtensions: boolean;
+  randomizeStoredFilenames: boolean;
+};
+
+export type SupportedExtensionGroup = {
+  group: 'image' | 'document' | 'video' | 'audio';
+  label: string;
+  extensions: string[];
+};
+
+/** Accepted ranges, supplied by the server so the form never validates against a stale copy. */
+export type SettingsLimits = {
+  minPdfSizeMb: number;
+  maxPdfSizeMb: number;
+  minWebpQuality: number;
+  maxWebpQuality: number;
+  /** Every extension the server can content-verify. The allow-list cannot exceed this. */
+  supportedFileExtensions: string[];
+  supportedFileExtensionGroups: SupportedExtensionGroup[];
+  defaultFileExtensions: string[];
+};
+
+const FALLBACK_LIMITS: SettingsLimits = {
+  minPdfSizeMb: 1,
+  maxPdfSizeMb: 500,
+  minWebpQuality: 1,
+  maxWebpQuality: 100,
+  supportedFileExtensions: [],
+  supportedFileExtensionGroups: [],
+  defaultFileExtensions: [],
+};
+
+export async function getSettings(): Promise<{ settings: PluginSettings; limits: SettingsLimits }> {
   const { get } = getFetchClient();
   try {
     const { data } = await get(`${basePath()}/settings`);
-    const body = data as { data?: { webpQuality: number; webpConversionEnabled: boolean } };
+    const body = data as { data?: PluginSettings; meta?: { limits?: Partial<SettingsLimits> } };
     if (!body?.data) throw new Error('Invalid settings response');
-    return body.data;
+    // Merged rather than substituted: older server builds predate `meta.limits` entirely, and
+    // builds between then and the file-type policy send it without the extension fields.
+    return { settings: body.data, limits: { ...FALLBACK_LIMITS, ...(body.meta?.limits ?? {}) } };
   } catch (e) {
     throw new Error(unwrapError(e));
   }
 }
 
-export async function putSettings(payload: { webpQuality?: number; webpConversionEnabled?: boolean }) {
+export async function putSettings(payload: Partial<PluginSettings>): Promise<PluginSettings> {
   const { put } = getFetchClient();
   try {
     const { data } = await put(`${basePath()}/settings`, payload);
-    const body = data as { data?: { webpQuality: number; webpConversionEnabled: boolean } };
+    const body = data as { data?: PluginSettings };
     if (!body?.data) throw new Error('Invalid settings response');
     return body.data;
   } catch (e) {

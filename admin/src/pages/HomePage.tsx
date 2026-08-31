@@ -28,6 +28,7 @@ import {
   postConversionBatch,
   type ConversionStats,
   type ConversionFile,
+  type SettingsLimits,
 } from '../utils/pluginRequest';
 
 /* ------------------------------------------------------------------ */
@@ -35,8 +36,26 @@ import {
 /* ------------------------------------------------------------------ */
 
 const UploadOptimizationPanel = () => {
+  /** Ranges come from the server with the settings payload — never hardcoded here. */
+  const [limits, setLimits] = useState<SettingsLimits>({
+    minPdfSizeMb: 1,
+    maxPdfSizeMb: 500,
+    minWebpQuality: 1,
+    maxWebpQuality: 100,
+    supportedFileExtensions: [],
+    supportedFileExtensionGroups: [],
+    defaultFileExtensions: [],
+  });
   const [quality, setQuality] = useState(82);
   const [enabled, setEnabled] = useState(true);
+  const [pdfValidation, setPdfValidation] = useState(true);
+  const [blockActiveContent, setBlockActiveContent] = useState(true);
+  /** Held as a string so the field can be cleared while typing; validated on save. */
+  const [maxPdfSize, setMaxPdfSize] = useState('25');
+  const [typePolicy, setTypePolicy] = useState(true);
+  const [allowedExtensions, setAllowedExtensions] = useState<string[]>([]);
+  const [blockMultiExt, setBlockMultiExt] = useState(true);
+  const [randomizeNames, setRandomizeNames] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -46,9 +65,17 @@ const UploadOptimizationPanel = () => {
     setLoading(true);
     setMsg(null);
     try {
-      const s = await getSettings();
+      const { settings: s, limits: l } = await getSettings();
+      setLimits(l);
       setQuality(s.webpQuality);
       setEnabled(s.webpConversionEnabled);
+      setPdfValidation(s.pdfValidationEnabled);
+      setMaxPdfSize(String(s.maxPdfSizeMb));
+      setBlockActiveContent(s.blockPdfActiveContent);
+      setTypePolicy(s.fileTypePolicyEnabled);
+      setAllowedExtensions(s.allowedFileExtensions ?? []);
+      setBlockMultiExt(s.blockMultipleExtensions);
+      setRandomizeNames(s.randomizeStoredFilenames);
     } catch (e) {
       setMsgVariant('danger');
       setMsg(e instanceof Error ? e.message : 'Failed to load settings');
@@ -57,13 +84,60 @@ const UploadOptimizationPanel = () => {
     }
   }, []);
 
+  const toggleExtension = (ext: string, on: boolean) => {
+    setAllowedExtensions((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(ext);
+      else next.delete(ext);
+      return [...next].sort();
+    });
+  };
+
+  const toggleGroup = (extensions: string[], on: boolean) => {
+    setAllowedExtensions((prev) => {
+      const next = new Set(prev);
+      for (const ext of extensions) {
+        if (on) next.add(ext);
+        else next.delete(ext);
+      }
+      return [...next].sort();
+    });
+  };
+
   useEffect(() => { void load(); }, [load]);
 
   const save = async () => {
+    const parsedPdfSize = Number(maxPdfSize);
+    if (
+      !Number.isFinite(parsedPdfSize) ||
+      parsedPdfSize < limits.minPdfSizeMb ||
+      parsedPdfSize > limits.maxPdfSizeMb
+    ) {
+      setMsgVariant('danger');
+      setMsg(`Maximum PDF size must be between ${limits.minPdfSizeMb} and ${limits.maxPdfSizeMb} MB.`);
+      return;
+    }
+    if (typePolicy && allowedExtensions.length === 0) {
+      setMsgVariant('danger');
+      setMsg('Select at least one allowed file type, or turn the allow-list off.');
+      return;
+    }
     setSaving(true);
     setMsg(null);
     try {
-      await putSettings({ webpQuality: quality, webpConversionEnabled: enabled });
+      const saved = await putSettings({
+        webpQuality: quality,
+        webpConversionEnabled: enabled,
+        pdfValidationEnabled: pdfValidation,
+        maxPdfSizeMb: parsedPdfSize,
+        blockPdfActiveContent: blockActiveContent,
+        fileTypePolicyEnabled: typePolicy,
+        allowedFileExtensions: allowedExtensions,
+        blockMultipleExtensions: blockMultiExt,
+        randomizeStoredFilenames: randomizeNames,
+      });
+      setMaxPdfSize(String(saved.maxPdfSizeMb));
+      setAllowedExtensions(saved.allowedFileExtensions ?? []);
       setMsgVariant('success');
       setMsg('Settings saved.');
     } catch (e) {
@@ -103,8 +177,8 @@ const UploadOptimizationPanel = () => {
             <Box paddingTop={2} style={{ maxWidth: 360 }}>
               <input
                 type="range"
-                min={1}
-                max={100}
+                min={limits.minWebpQuality}
+                max={limits.maxWebpQuality}
                 step={1}
                 value={quality}
                 disabled={loading || saving}
@@ -118,6 +192,210 @@ const UploadOptimizationPanel = () => {
               </Typography>
             </Box>
           </Field.Root>
+        </Box>
+
+        <Divider />
+
+        <Box>
+          <Typography variant="delta" tag="h2">Document validation</Typography>
+          <Box paddingTop={1}>
+            <Typography variant="omega" textColor="neutral600">
+              PDF uploads are checked against their magic bytes — the file must start with the
+              <code> %PDF-</code> signature and end with the <code>%%EOF</code> trailer. Files disguised
+              as another type, and PDFs that are truncated or corrupt, are rejected before Strapi stores them.
+            </Typography>
+          </Box>
+        </Box>
+
+        <Checkbox
+          checked={pdfValidation}
+          onCheckedChange={(v: boolean | 'indeterminate') => setPdfValidation(v === true)}
+          disabled={loading || saving}
+        >
+          Validate PDF uploads
+        </Checkbox>
+
+        <Box>
+          <Checkbox
+            checked={blockActiveContent}
+            onCheckedChange={(v: boolean | 'indeterminate') => setBlockActiveContent(v === true)}
+            disabled={loading || saving || !pdfValidation}
+          >
+            Reject PDFs containing JavaScript or launch actions
+          </Checkbox>
+          <Box paddingTop={1}>
+            <Typography variant="pi" textColor="neutral500">
+              Covers compressed PDFs too. Interactive PDF forms that use scripts for field
+              validation will be rejected — untick this if you need to publish one.
+            </Typography>
+          </Box>
+        </Box>
+
+        <Box>
+          <Field.Root
+            name="maxPdfSizeMb"
+            hint={`Uploads larger than this are rejected. ${limits.minPdfSizeMb}–${limits.maxPdfSizeMb} MB. Default 25.`}
+          >
+            <Field.Label>Maximum PDF size (MB)</Field.Label>
+            <Box style={{ maxWidth: 200 }}>
+              <Field.Input
+                type="number"
+                min={limits.minPdfSizeMb}
+                max={limits.maxPdfSizeMb}
+                step={1}
+                value={maxPdfSize}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setMaxPdfSize(e.target.value)}
+                disabled={loading || saving || !pdfValidation}
+              />
+            </Box>
+            <Field.Hint />
+          </Field.Root>
+        </Box>
+
+        <Divider />
+
+        <Box>
+          <Typography variant="delta" tag="h2">File type policy</Typography>
+          <Box paddingTop={1}>
+            <Typography variant="omega" textColor="neutral600">
+              Default-deny: only the types ticked below are accepted, and each upload's bytes must
+              match the extension it claims. This is what stops an executable or a script from being
+              stored under an image name — Strapi itself does not restrict upload types.
+            </Typography>
+          </Box>
+        </Box>
+
+        <Checkbox
+          checked={typePolicy}
+          onCheckedChange={(v: boolean | 'indeterminate') => setTypePolicy(v === true)}
+          disabled={loading || saving}
+        >
+          Enforce the file type allow-list
+        </Checkbox>
+
+        {!typePolicy && (
+          <Box
+            padding={4}
+            background="danger100"
+            hasRadius
+            borderColor="danger200"
+            borderStyle="solid"
+            borderWidth="1px"
+          >
+            <Typography variant="omega" fontWeight="bold" textColor="danger600">
+              Uploads are unrestricted
+            </Typography>
+            <Box paddingTop={1}>
+              <Typography variant="omega" textColor="danger600">
+                With this off, any file type can be uploaded — including executables and server-side
+                scripts. Only turn it off temporarily, while auditing which types your editors need.
+              </Typography>
+            </Box>
+          </Box>
+        )}
+
+        <Box>
+          <Flex justifyContent="space-between" alignItems="baseline" wrap="wrap" gap={2}>
+            <Typography variant="omega" fontWeight="bold" textColor="neutral800">
+              Allowed types ({allowedExtensions.length} selected)
+            </Typography>
+            <Button
+              variant="tertiary"
+              onClick={() => setAllowedExtensions([...limits.defaultFileExtensions].sort())}
+              disabled={loading || saving || !typePolicy || limits.defaultFileExtensions.length === 0}
+            >
+              Reset to recommended
+            </Button>
+          </Flex>
+
+          <Box paddingTop={3}>
+            <Flex direction="column" alignItems="stretch" gap={4}>
+              {limits.supportedFileExtensionGroups.map((group) => {
+                const allOn = group.extensions.every((e) => allowedExtensions.includes(e));
+                return (
+                  <Box
+                    key={group.group}
+                    padding={3}
+                    background="neutral100"
+                    hasRadius
+                    borderColor="neutral150"
+                    borderStyle="solid"
+                    borderWidth="1px"
+                  >
+                    <Checkbox
+                      checked={allOn}
+                      onCheckedChange={(v: boolean | 'indeterminate') =>
+                        toggleGroup(group.extensions, v === true)
+                      }
+                      disabled={loading || saving || !typePolicy}
+                    >
+                      <Typography variant="omega" fontWeight="bold">{group.label}</Typography>
+                    </Checkbox>
+                    <Box paddingTop={2} paddingLeft={6}>
+                      <Flex wrap="wrap" gap={4}>
+                        {group.extensions.map((ext) => (
+                          <Box key={ext} style={{ minWidth: 96 }}>
+                            <Checkbox
+                              checked={allowedExtensions.includes(ext)}
+                              onCheckedChange={(v: boolean | 'indeterminate') =>
+                                toggleExtension(ext, v === true)
+                              }
+                              disabled={loading || saving || !typePolicy}
+                            >
+                              .{ext}
+                            </Checkbox>
+                          </Box>
+                        ))}
+                      </Flex>
+                    </Box>
+                  </Box>
+                );
+              })}
+            </Flex>
+          </Box>
+
+          <Box paddingTop={2}>
+            <Typography variant="pi" textColor="neutral500">
+              Legacy <code>.doc</code> / <code>.xls</code> / <code>.ppt</code> and macro-enabled
+              Office files are not offered: they are OLE containers that can carry VBA macros, and
+              that container is rejected on sight. Save as <code>.docx</code> / <code>.xlsx</code> /
+              <code> .pptx</code> instead.
+            </Typography>
+          </Box>
+        </Box>
+
+        <Box>
+          <Checkbox
+            checked={blockMultiExt}
+            onCheckedChange={(v: boolean | 'indeterminate') => setBlockMultiExt(v === true)}
+            disabled={loading || saving || !typePolicy}
+          >
+            Reject filenames carrying more than one extension
+          </Checkbox>
+          <Box paddingTop={1}>
+            <Typography variant="pi" textColor="neutral500">
+              Refuses <code>invoice.svg.png</code> and <code>shell.php.jpg</code>. Ordinary names
+              with dots in them, like <code>report.v1.2.pdf</code>, are unaffected — only a segment
+              that is itself a file extension triggers this.
+            </Typography>
+          </Box>
+        </Box>
+
+        <Box>
+          <Checkbox
+            checked={randomizeNames}
+            onCheckedChange={(v: boolean | 'indeterminate') => setRandomizeNames(v === true)}
+            disabled={loading || saving}
+          >
+            Replace stored filenames with random names
+          </Checkbox>
+          <Box paddingTop={1}>
+            <Typography variant="pi" textColor="neutral500">
+              Removes the uploader's text from the URL and the media library entirely. Strapi already
+              appends 10 random characters to every stored name, so URLs aren't guessable without
+              this — turn it on only if you also want the original name gone.
+            </Typography>
+          </Box>
         </Box>
 
         {msg && (
@@ -1515,6 +1793,7 @@ const ConversionPanel = () => {
 
   const [msg, setMsg] = useState<string | null>(null);
   const [msgVariant, setMsgVariant] = useState<'success' | 'danger' | 'warning'>('success');
+  const [msgTitle, setMsgTitle] = useState<string | null>(null);
 
   const setFileStatus = (id: number, s: FileConvStatus) =>
     setFileStatuses((prev) => new Map([...prev, [id, s]]));
@@ -1572,7 +1851,7 @@ const ConversionPanel = () => {
     void loadStats();
     void loadFiles(1);
     getSettings()
-      .then((s) => setSettingsQuality(s.webpQuality))
+      .then(({ settings }) => setSettingsQuality(settings.webpQuality))
       .catch(() => {});
   }, [loadStats, loadFiles]);
 
@@ -1599,6 +1878,7 @@ const ConversionPanel = () => {
     const toConvert = filesTotal;
     if (toConvert === 0) {
       setMsgVariant('success');
+      setMsgTitle(null);
       setMsg(searchQuery || mimeFilter ? 'No files match the current filters.' : 'All images are already in WebP format.');
       return;
     }
@@ -1619,9 +1899,11 @@ const ConversionPanel = () => {
     setBulkOriginalKB(0);
     setBulkTotal(toConvert);
     setMsg(null);
+    setMsgTitle(null);
     setFileStatuses(new Map());
 
     let localConverted = 0;
+    let localFailed = 0;
     let localSavedKB = 0;
     let localOriginalKB = 0;
 
@@ -1645,6 +1927,7 @@ const ConversionPanel = () => {
         const batch = allIds.slice(i, i + BATCH_SIZE);
         const r = await postConversionBatch({ fileIds: batch, quality: effectiveQuality, losslessMimes });
         localConverted += r.converted;
+        localFailed += r.failed;
         localSavedKB += r.savedKB;
         localOriginalKB += r.originalKB;
         setBulkConverted(localConverted);
@@ -1656,20 +1939,35 @@ const ConversionPanel = () => {
         }
       }
 
+      const savings = savingsSummary(localSavedKB, localOriginalKB);
+      const savingsSuffix = savings ? ` ${savings}.` : '';
+
       if (bulkStopRef.current) {
         setMsgVariant('warning');
-        const savings = savingsSummary(localSavedKB, localOriginalKB);
-        setMsg(`Stopped after converting ${localConverted.toLocaleString()} file(s).${savings ? ` ${savings}.` : ''} Run Convert All again to resume.`);
+        setMsgTitle('Stopped');
+        const failedSuffix = localFailed > 0 ? ` ${localFailed} failed.` : '';
+        setMsg(`Converted ${localConverted.toLocaleString()} file(s) before stopping.${failedSuffix}${savingsSuffix} Run Convert All again to resume.`);
       } else {
         setBulkDone(true);
-        setMsgVariant('success');
-        const savings = savingsSummary(localSavedKB, localOriginalKB);
-        setMsg(`Done — ${localConverted.toLocaleString()} file${localConverted === 1 ? '' : 's'} converted to WebP.${savings ? ` ${savings}.` : ''}`);
+        if (localConverted === 0 && localFailed > 0) {
+          setMsgVariant('danger');
+          setMsgTitle('Conversion failed');
+          setMsg(`${localFailed} file${localFailed === 1 ? '' : 's'} failed to convert. Hover the X Error tag on each row to see why.`);
+        } else if (localFailed > 0) {
+          setMsgVariant('warning');
+          setMsgTitle('Completed with errors');
+          setMsg(`${localConverted.toLocaleString()} file${localConverted === 1 ? '' : 's'} converted, ${localFailed} failed. Hover the X Error tag on each row to see why.${savingsSuffix}`);
+        } else {
+          setMsgVariant('success');
+          setMsgTitle('Done');
+          setMsg(`${localConverted.toLocaleString()} file${localConverted === 1 ? '' : 's'} converted to WebP.${savingsSuffix}`);
+        }
       }
       void loadStats();
       void loadFiles(filesPage, searchQuery, mimeFilter);
     } catch (e) {
       setMsgVariant('danger');
+      setMsgTitle('Error');
       setMsg(e instanceof Error ? e.message : 'Bulk conversion failed');
     } finally {
       setBulkRunning(false);
@@ -1800,10 +2098,10 @@ const ConversionPanel = () => {
 
           {msg && (
             <Alert
-              title={msgVariant === 'success' ? 'Done' : msgVariant === 'warning' ? 'Stopped' : 'Error'}
+              title={msgTitle ?? (msgVariant === 'success' ? 'Done' : msgVariant === 'warning' ? 'Stopped' : 'Error')}
               variant={msgVariant}
               closeLabel="Dismiss"
-              onClose={() => setMsg(null)}
+              onClose={() => { setMsg(null); setMsgTitle(null); }}
             >
               {msg}
             </Alert>
