@@ -11,7 +11,11 @@ export type PluginSettings = {
   webpQuality: number;
   webpConversionEnabled: boolean;
   pdfValidationEnabled: boolean;
-  maxPdfSizeMb: number;
+  /**
+   * The only size setting the plugin owns. Everything else defers to the host's upload limit;
+   * this exists because SVG scanning matches against the whole decoded document.
+   */
+  maxSvgSizeMb: number;
   blockPdfActiveContent: boolean;
   fileTypePolicyEnabled: boolean;
   allowedFileExtensions: string[];
@@ -23,7 +27,7 @@ const DEFAULTS: PluginSettings = {
   webpQuality: 82,
   webpConversionEnabled: true,
   pdfValidationEnabled: true,
-  maxPdfSizeMb: 25,
+  maxSvgSizeMb: 5,
   blockPdfActiveContent: true,
   fileTypePolicyEnabled: true,
   allowedFileExtensions: [...DEFAULT_ALLOWED_EXTENSIONS],
@@ -39,8 +43,8 @@ const DEFAULTS: PluginSettings = {
  * server clamp cannot drift apart.
  */
 export const SETTINGS_LIMITS = {
-  minPdfSizeMb: 1,
-  maxPdfSizeMb: 500,
+  minSvgSizeMb: 1,
+  maxSvgSizeMb: 50,
   minWebpQuality: 1,
   maxWebpQuality: 100,
   /** Every extension the plugin can content-verify — the allow-list may not exceed this. */
@@ -56,10 +60,10 @@ function clampQuality(q: unknown): number {
   return Math.min(SETTINGS_LIMITS.maxWebpQuality, Math.max(SETTINGS_LIMITS.minWebpQuality, Math.round(n)));
 }
 
-function clampPdfSize(mb: unknown): number {
+function clampSvgSize(mb: unknown): number {
   const n = typeof mb === 'number' ? mb : Number(mb);
-  if (Number.isNaN(n)) return DEFAULTS.maxPdfSizeMb;
-  return Math.min(SETTINGS_LIMITS.maxPdfSizeMb, Math.max(SETTINGS_LIMITS.minPdfSizeMb, Math.round(n)));
+  if (Number.isNaN(n)) return DEFAULTS.maxSvgSizeMb;
+  return Math.min(SETTINGS_LIMITS.maxSvgSizeMb, Math.max(SETTINGS_LIMITS.minSvgSizeMb, Math.round(n)));
 }
 
 export default ({ strapi }: { strapi: Core.Strapi }) => {
@@ -78,7 +82,7 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
         typeof stored?.pdfValidationEnabled === 'boolean'
           ? stored.pdfValidationEnabled
           : (configDefaults.pdfValidationEnabled ?? DEFAULTS.pdfValidationEnabled),
-      maxPdfSizeMb: clampPdfSize(stored?.maxPdfSizeMb ?? configDefaults.maxPdfSizeMb ?? DEFAULTS.maxPdfSizeMb),
+      maxSvgSizeMb: clampSvgSize(stored?.maxSvgSizeMb ?? configDefaults.maxSvgSizeMb ?? DEFAULTS.maxSvgSizeMb),
       blockPdfActiveContent:
         typeof stored?.blockPdfActiveContent === 'boolean'
           ? stored.blockPdfActiveContent
@@ -113,8 +117,8 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
           partial.webpConversionEnabled !== undefined ? Boolean(partial.webpConversionEnabled) : current.webpConversionEnabled,
         pdfValidationEnabled:
           partial.pdfValidationEnabled !== undefined ? Boolean(partial.pdfValidationEnabled) : current.pdfValidationEnabled,
-        maxPdfSizeMb:
-          partial.maxPdfSizeMb !== undefined ? clampPdfSize(partial.maxPdfSizeMb) : current.maxPdfSizeMb,
+        maxSvgSizeMb:
+          partial.maxSvgSizeMb !== undefined ? clampSvgSize(partial.maxSvgSizeMb) : current.maxSvgSizeMb,
         blockPdfActiveContent:
           partial.blockPdfActiveContent !== undefined
             ? Boolean(partial.blockPdfActiveContent)

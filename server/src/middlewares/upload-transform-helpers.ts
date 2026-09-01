@@ -12,7 +12,6 @@ import { SVG_MIME_TYPES, hasSvgSignature, isSvgFile, validateSvgFile } from './s
 import {
   TYPE_SNIFF_BYTES,
   readHeadBytes,
-  readWholeUpload,
   type UploadFile,
 } from './upload-file';
 import { UploadRejectedError } from './upload-rejection';
@@ -177,7 +176,7 @@ type UploadSettings = {
   webpConversionEnabled: boolean;
   webpQuality: number;
   pdfValidationEnabled: boolean;
-  maxPdfSizeMb: number;
+  maxSvgSizeMb: number;
   blockPdfActiveContent: boolean;
   fileTypePolicyEnabled: boolean;
   allowedFileExtensions: string[];
@@ -244,12 +243,12 @@ async function transformSingleUpload(
     webpConversionEnabled,
     webpQuality,
     pdfValidationEnabled,
-    maxPdfSizeMb,
+    maxSvgSizeMb,
     blockPdfActiveContent,
   } = settings;
 
   if (pdfValidationEnabled) {
-    const pdfCheck = await inspectPdfUpload(file, maxPdfSizeMb * 1024 * 1024);
+    const pdfCheck = await inspectPdfUpload(file);
     if (pdfCheck.outcome === 'invalid') {
       if (pdfCheck.diagnostic) {
         strapi.log.warn(`${LOG_PREFIX} "${file.originalFilename}" rejected — ${pdfCheck.diagnostic}`);
@@ -257,9 +256,9 @@ async function transformSingleUpload(
       throw new UploadRejectedError(pdfCheck.errorMessage);
     }
     if (pdfCheck.outcome === 'valid') {
-      // Only reached once the size limit has passed, so reading the whole file is bounded.
+      // Streams the file, so this runs at any size the host accepts — no PDF is stored unscanned.
       if (blockPdfActiveContent) {
-        const scan = await scanPdfActiveContent(await readWholeUpload(file));
+        const scan = await scanPdfActiveContent(file);
         if (scan.outcome === 'blocked') {
           strapi.log.warn(
             `${LOG_PREFIX} "${file.originalFilename}" active content — ${scan.diagnostic}`
@@ -284,7 +283,7 @@ async function transformSingleUpload(
   // convertor must not quietly re-open the door to scriptable uploads. Sniffing the bytes
   // as well as the declared type catches an SVG renamed to slip past the extension check.
   if (isSvgFile(file) || (await hasSvgSignature(file))) {
-    const svgCheck = await validateSvgFile(file);
+    const svgCheck = await validateSvgFile(file, maxSvgSizeMb * 1024 * 1024);
     if (svgCheck.outcome === 'invalid') {
       throw new UploadRejectedError(svgCheck.errorMessage);
     }

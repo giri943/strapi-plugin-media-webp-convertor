@@ -9,7 +9,15 @@ import { readHeadBytes, readWholeUpload, resolveUploadSize, type UploadFile } fr
  * entity-decoded copy, so `&#106;avascript:` cannot smuggle a payload past a literal match.
  */
 
-const MAX_SVG_FILE_SIZE = 5 * 1024 * 1024;
+/**
+ * Fallback cap, used when no limit is passed.
+ *
+ * SVG is the one type that keeps a plugin-side size limit. The rules below match against the whole
+ * decoded document, and doing that correctly across chunk boundaries — with entity decoding and
+ * UTF-16 in play — is not something to attempt for a format that has no business being large. A
+ * multi-megabyte SVG is machine-generated junk or an attack, so the cap costs nothing real.
+ */
+const DEFAULT_MAX_SVG_FILE_SIZE = 5 * 1024 * 1024;
 
 /** Shared with `isImageFile` so the two never disagree about what counts as an SVG. */
 export const SVG_MIME_TYPES = ['image/svg+xml', 'application/svg+xml', 'text/svg+xml'];
@@ -120,21 +128,26 @@ export async function hasSvgSignature(file: UploadFile): Promise<boolean> {
   }
 }
 
-export async function validateSvgFile(file: UploadFile): Promise<SvgValidationResult> {
+export async function validateSvgFile(
+  file: UploadFile,
+  maxSizeBytes: number = DEFAULT_MAX_SVG_FILE_SIZE
+): Promise<SvgValidationResult> {
   try {
+    const limit = maxSizeBytes > 0 ? maxSizeBytes : DEFAULT_MAX_SVG_FILE_SIZE;
     const size = await resolveUploadSize(file);
 
     if (size === 0) {
       return { outcome: 'invalid', errorMessage: 'SVG file is empty.' };
     }
-    if (size > MAX_SVG_FILE_SIZE) {
+    if (size > limit) {
+      const mb = limit / (1024 * 1024);
       return {
         outcome: 'invalid',
-        errorMessage: `SVG file is too large. Maximum is ${MAX_SVG_FILE_SIZE / (1024 * 1024)}MB.`,
+        errorMessage: `SVG file is too large. Maximum is ${Number.isInteger(mb) ? mb : mb.toFixed(1)}MB.`,
       };
     }
 
-    // Bounded by MAX_SVG_FILE_SIZE above, so reading every byte is safe here.
+    // Bounded by the limit above, so reading every byte is safe here.
     const raw = await readWholeUpload(file);
 
     // A gzipped SVG renders in the browser but reads as binary noise here, so pattern

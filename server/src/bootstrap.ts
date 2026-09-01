@@ -1,5 +1,6 @@
 import type { Core } from '@strapi/strapi';
 import { PLUGIN_NAME } from './constants';
+import { formatBytes, resolveUploadLimit } from './middlewares/upload-size';
 
 type MiddlewareFactory = (config: unknown, opts: { strapi: Core.Strapi }) => (ctx: unknown, next: () => Promise<unknown>) => Promise<unknown>;
 
@@ -30,8 +31,28 @@ function warnAboutLocalProvider(strapi: Core.Strapi) {
   }
 }
 
+/**
+ * Report the size ceiling the plugin inherited, and where it read it from.
+ *
+ * Worth a line at startup because the value is not the plugin's own: an operator who sets
+ * `sizeLimit` but not the body middleware's `formidable.maxFileSize` gets a different number than
+ * they expect, and this is where that shows up.
+ */
+function reportUploadLimit(strapi: Core.Strapi) {
+  try {
+    const limit = resolveUploadLimit(strapi);
+    strapi.log.info(
+      `[${PLUGIN_NAME}] Maximum upload size ${formatBytes(limit.bytes)}, inherited from ${limit.source}. ` +
+        'The plugin applies no size limit of its own; PDFs are content-scanned at any size.'
+    );
+  } catch {
+    /* advisory only */
+  }
+}
+
 export default async ({ strapi }: { strapi: Core.Strapi }) => {
   await strapi.plugin(PLUGIN_NAME).service('settings').ensureDefaults();
+  reportUploadLimit(strapi);
   warnAboutLocalProvider(strapi);
 
   const factory = strapi.plugin(PLUGIN_NAME).middleware('convert-upload-webp') as MiddlewareFactory | undefined;

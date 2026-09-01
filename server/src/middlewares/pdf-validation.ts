@@ -41,6 +41,13 @@ export type PdfUploadCheck =
   /** `diagnostic` is for the server log only — never surfaced to the uploader. */
   | { outcome: 'invalid'; errorMessage: string; diagnostic?: string };
 
+/**
+ * No size limit is applied here. `strapi::body` already refused anything above the project's
+ * configured maximum before this middleware ran, and active-content scanning streams, so there is
+ * nothing left for a second, smaller plugin-side number to protect — it would only reject files the
+ * project had decided to accept.
+ */
+
 /** Leading bytes as hex + printable ASCII, so a rejection can be diagnosed from the log. */
 function describeLeadingBytes(head: Buffer): string {
   const slice = head.subarray(0, 8);
@@ -56,18 +63,13 @@ export function isPdfFile(file: UploadFile): boolean {
   return (file.originalFilename || '').toLowerCase().endsWith('.pdf');
 }
 
-function formatMb(bytes: number): string {
-  const mb = bytes / (1024 * 1024);
-  return Number.isInteger(mb) ? String(mb) : mb.toFixed(1);
-}
-
 /**
  * Classify an upload against the PDF magic bytes.
  *
  * Both directions are checked: a file claiming to be a PDF must prove it, and a file
  * claiming to be something else must not secretly be one.
  */
-export async function inspectPdfUpload(file: UploadFile, maxSizeBytes: number): Promise<PdfUploadCheck> {
+export async function inspectPdfUpload(file: UploadFile): Promise<PdfUploadCheck> {
   let head: Buffer;
   try {
     head = await readHeadBytes(file, MAX_HEADER_SEARCH_BYTES);
@@ -94,12 +96,6 @@ export async function inspectPdfUpload(file: UploadFile, maxSizeBytes: number): 
     const size = await resolveUploadSize(file);
     if (size === 0) {
       return { outcome: 'invalid', errorMessage: 'PDF file is empty.' };
-    }
-    if (size > maxSizeBytes) {
-      return {
-        outcome: 'invalid',
-        errorMessage: `PDF file is too large. Maximum is ${formatMb(maxSizeBytes)}MB.`,
-      };
     }
 
     if (headerOffset === -1) {

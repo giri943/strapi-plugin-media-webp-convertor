@@ -242,7 +242,8 @@ export function normaliseAllowedExtensions(input: unknown): string[] {
     .map((v) => v.trim().toLowerCase().replace(/^\.+/, ''))
     .filter((v) => Object.prototype.hasOwnProperty.call(EXTENSION_RULES, v));
   const unique = [...new Set(cleaned)].sort();
-  return unique.length > 0 ? unique : [...DEFAULT_ALLOWED_EXTENSIONS];
+  // Sorted on both paths so the value the API and admin panel report is order-stable.
+  return unique.length > 0 ? unique : [...DEFAULT_ALLOWED_EXTENSIONS].sort();
 }
 
 function startsWithSignature(head: Buffer, hex: string): boolean {

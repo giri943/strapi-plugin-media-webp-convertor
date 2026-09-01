@@ -1,17 +1,34 @@
-import {
-  DEFAULT_ALLOWED_EXTENSIONS,
-  EXTENSION_RULES,
-} from '../middlewares/file-type-policy';
+import { EXTENSION_RULES } from '../middlewares/file-type-policy';
 
+/**
+ * There is deliberately no upload size setting here.
+ *
+ * The size ceiling is the host project's own — `strapi::body`'s `formidable.maxFileSize`, or
+ * `plugin::upload.sizeLimit` — resolved at runtime by `middlewares/upload-size.ts`. A second number
+ * in the plugin could only ever contradict the first, and the usual result is a project that has
+ * configured 150 MB uploads being refused at 25 MB by something it forgot was there.
+ *
+ * `maxSvgSizeMb` is the single exception, and it is a scanning constraint rather than a policy
+ * choice: the SVG rules match against the whole decoded document.
+ */
 export default {
   default: {
     webpQuality: 82,
     webpConversionEnabled: true,
     pdfValidationEnabled: true,
-    maxPdfSizeMb: 25,
+    maxSvgSizeMb: 5,
     blockPdfActiveContent: true,
     fileTypePolicyEnabled: true,
-    allowedFileExtensions: DEFAULT_ALLOWED_EXTENSIONS,
+    /**
+     * Empty on purpose — the recommended set is resolved in the settings service, not here.
+     *
+     * Strapi merges a user's `config/plugins` block over this object with lodash `defaultsDeep`,
+     * which merges arrays **by index** rather than replacing them. Listing the real defaults here
+     * would mean an operator who tightens the policy to `['pdf', 'png']` silently gets every
+     * default entry from index 2 onwards back — a widened allow-list that reads as narrowed in
+     * their own config file. An empty array has nothing to backfill from.
+     */
+    allowedFileExtensions: [] as string[],
     blockMultipleExtensions: true,
     randomizeStoredFilenames: false,
   },
@@ -19,7 +36,7 @@ export default {
     webpQuality?: number;
     webpConversionEnabled?: boolean;
     pdfValidationEnabled?: boolean;
-    maxPdfSizeMb?: number;
+    maxSvgSizeMb?: number;
     blockPdfActiveContent?: boolean;
     fileTypePolicyEnabled?: boolean;
     allowedFileExtensions?: unknown;
@@ -32,10 +49,10 @@ export default {
         throw new Error('plugin config webpQuality must be between 1 and 100');
       }
     }
-    if (config.maxPdfSizeMb !== undefined) {
-      const mb = Number(config.maxPdfSizeMb);
-      if (Number.isNaN(mb) || mb < 1 || mb > 500) {
-        throw new Error('plugin config maxPdfSizeMb must be between 1 and 500');
+    if (config.maxSvgSizeMb !== undefined) {
+      const mb = Number(config.maxSvgSizeMb);
+      if (Number.isNaN(mb) || mb < 1 || mb > 50) {
+        throw new Error('plugin config maxSvgSizeMb must be between 1 and 50');
       }
     }
     if (config.allowedFileExtensions !== undefined) {
