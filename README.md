@@ -46,8 +46,8 @@ export default {
 
 Restart Strapi. Conversion and upload validation are on by default — nothing else is required.
 
-Settings live under **Settings → Media WebP & migration** in the admin panel and can be changed
-without a restart.
+The plugin adds **Media WebP & Migration** to the left-hand navigation in the admin panel
+(`/admin/plugins/strapi-media-webp-convertor`). Everything is configurable there without a restart.
 
 ---
 
@@ -302,8 +302,7 @@ XSS vector. Use CSS animation or a video format.
 
 ## Convert existing images
 
-**Settings → Media WebP & migration → Convert existing** lists everything in your library that isn't
-WebP yet.
+**Media WebP & Migration → Convert existing** lists everything in your library that isn't WebP yet.
 
 Per file, the plugin downloads the original, converts it with [sharp](https://sharp.pixelplumbing.com/),
 uploads the `.webp` through your provider, updates the database record (`url`, `name`, `ext`, `mime`,
@@ -331,7 +330,7 @@ afterwards.
 
 ## Migration tools
 
-**Settings → Media WebP & migration → Migration.** Credentials are sent per request and never stored
+**Media WebP & Migration → Migration.** Credentials are sent per request and never stored
 server-side.
 
 **Local to S3.** Enter region, bucket, keys and the public base URL; optionally preserve media
@@ -355,7 +354,8 @@ with a confirmation dialog and stop/resume. Needs `s3:DeleteObject`.
 
 ## Permissions
 
-Super Admin has everything. For other roles, **Settings → Roles → Media WebP & migration**:
+Super Admin has everything. For other roles, go to **Settings → Roles**, edit the role, and expand
+**Media WebP & Migration** under the plugin permissions:
 
 | Action | Unlocks |
 |---|---|
