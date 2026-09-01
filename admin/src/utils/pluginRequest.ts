@@ -43,12 +43,22 @@ export type PluginSettings = {
   webpQuality: number;
   webpConversionEnabled: boolean;
   pdfValidationEnabled: boolean;
-  maxPdfSizeMb: number;
+  maxSvgSizeMb: number;
   blockPdfActiveContent: boolean;
   fileTypePolicyEnabled: boolean;
   allowedFileExtensions: string[];
   blockMultipleExtensions: boolean;
   randomizeStoredFilenames: boolean;
+};
+
+/**
+ * The host project's upload ceiling. Read-only here — it belongs to `config/middlewares.ts`, not
+ * to this plugin, so the panel reports it rather than offering to change it.
+ */
+export type UploadLimitInfo = {
+  bytes: number;
+  formatted: string;
+  source: string;
 };
 
 export type SupportedExtensionGroup = {
@@ -59,8 +69,8 @@ export type SupportedExtensionGroup = {
 
 /** Accepted ranges, supplied by the server so the form never validates against a stale copy. */
 export type SettingsLimits = {
-  minPdfSizeMb: number;
-  maxPdfSizeMb: number;
+  minSvgSizeMb: number;
+  maxSvgSizeMb: number;
   minWebpQuality: number;
   maxWebpQuality: number;
   /** Every extension the server can content-verify. The allow-list cannot exceed this. */
@@ -70,8 +80,8 @@ export type SettingsLimits = {
 };
 
 const FALLBACK_LIMITS: SettingsLimits = {
-  minPdfSizeMb: 1,
-  maxPdfSizeMb: 500,
+  minSvgSizeMb: 1,
+  maxSvgSizeMb: 50,
   minWebpQuality: 1,
   maxWebpQuality: 100,
   supportedFileExtensions: [],
@@ -79,15 +89,26 @@ const FALLBACK_LIMITS: SettingsLimits = {
   defaultFileExtensions: [],
 };
 
-export async function getSettings(): Promise<{ settings: PluginSettings; limits: SettingsLimits }> {
+export async function getSettings(): Promise<{
+  settings: PluginSettings;
+  limits: SettingsLimits;
+  uploadLimit: UploadLimitInfo | null;
+}> {
   const { get } = getFetchClient();
   try {
     const { data } = await get(`${basePath()}/settings`);
-    const body = data as { data?: PluginSettings; meta?: { limits?: Partial<SettingsLimits> } };
+    const body = data as {
+      data?: PluginSettings;
+      meta?: { limits?: Partial<SettingsLimits>; uploadLimit?: UploadLimitInfo };
+    };
     if (!body?.data) throw new Error('Invalid settings response');
     // Merged rather than substituted: older server builds predate `meta.limits` entirely, and
     // builds between then and the file-type policy send it without the extension fields.
-    return { settings: body.data, limits: { ...FALLBACK_LIMITS, ...(body.meta?.limits ?? {}) } };
+    return {
+      settings: body.data,
+      limits: { ...FALLBACK_LIMITS, ...(body.meta?.limits ?? {}) },
+      uploadLimit: body.meta?.uploadLimit ?? null,
+    };
   } catch (e) {
     throw new Error(unwrapError(e));
   }

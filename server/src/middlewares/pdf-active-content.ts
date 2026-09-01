@@ -1,5 +1,7 @@
 import { setImmediate as yieldToEventLoop } from 'timers/promises';
+import { open } from 'fs/promises';
 import zlib from 'zlib';
+import type { UploadFile } from './upload-file';
 
 /**
  * Detection of executable active content inside a structurally valid PDF.
@@ -17,29 +19,68 @@ import zlib from 'zlib';
  * 3. **Names are decoded before matching.** PDF permits `#xx` hex escapes inside names, so
  *    `/S /J#61vaScript` is the same action to a viewer and must be the same to the scanner.
  *
- * And three shape how it runs, because this sits on the request path:
+ * ## Why this streams
  *
- * - Stream boundaries are found with `Buffer.indexOf` in a single linear pass. An earlier
- *   lazy-regex version was quadratic — 2.4 MB of `obj` tokens blocked the event loop for ~16 s.
- * - Only the object-definition gaps are converted to text, one at a time. The whole file is never
- *   held as a string, so peak memory tracks the largest gap rather than the file.
- * - Decompression is async and the loop yields between segments, so a large PDF cannot stall
- *   other requests.
+ * The scan is a single forward pass, so it never needed random access — but an earlier version
+ * took the whole file as a `Buffer`, which put a hard ceiling on the size it would look at. Past
+ * that ceiling the outcome was `inconclusive`, and an inconclusive scan *stores* the file. A site
+ * that raised its upload limit for large brochures therefore got exactly the wrong trade: the
+ * bigger the PDF, the less it was checked.
+ *
+ * The traversal is now a state machine over fixed-size chunks. Decision 1 above is what makes that
+ * cheap: the bulk of any large PDF is non-object stream bodies — images, fonts, page content — and
+ * those are deliberately not scanned, so they are discarded as they pass rather than accumulated.
+ * Peak memory is bounded by the caps below no matter how large the file is, and there is no size at
+ * which the scan declines to run.
+ *
+ * ## Why the budgets are about decompression, not stream count
+ *
+ * Skipping a stream body is a `Buffer.indexOf` over bytes already in hand, so the number of streams
+ * is not the expensive axis — inflating them is. Budgets therefore cap decompression work. Capping
+ * stream *count* would quietly reintroduce the original flaw, because a large PDF has thousands of
+ * streams and would trip the cap on size alone.
+ *
+ * Two shape choices keep the pass linear rather than quadratic:
+ *
+ * - Searches advance a `cursor` instead of re-scanning `pending` from the start. A PDF can hold
+ *   ~30k tiny streams per megabyte; re-searching each time would be O(bytes²) and is a hang, not a
+ *   slowdown. The original whole-file version had the same trap and solved it the same way.
+ * - Consumed bytes are dropped by compaction on a threshold, so the buffer does not grow with the
+ *   file and compaction cost is amortised.
  */
 
 /** Bounds on decompression work — a small PDF can inflate to gigabytes (zip bomb). */
-const MAX_STREAMS_INSPECTED = 250;
+const MAX_OBJECT_STREAMS_INFLATED = 250;
 const MAX_INFLATED_BYTES_PER_STREAM = 4 * 1024 * 1024;
 const MAX_TOTAL_INFLATED_BYTES = 32 * 1024 * 1024;
 
 /**
- * Above this the file is not scanned at all. `maxPdfSizeMb` permits up to 500 MB; a bounded
- * refusal beats spending the request budget on a file that large.
+ * Compressed size of a single object stream we are willing to hold.
+ *
+ * Needed because the inflate path tries zlib first and falls back to raw deflate, and a retry
+ * requires the input again. Object streams hold object definitions rather than page content, so
+ * they are small in practice; one over this size is reported as undecompressable, which surfaces
+ * as `inconclusive` rather than a silent pass.
  */
-const MAX_SCAN_BYTES = 64 * 1024 * 1024;
+const MAX_OBJSTM_INPUT_BYTES = 4 * 1024 * 1024;
+
+/** Read granularity. Only ever one of these is live at a time. */
+const CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * Cap on a single object-definition region held for matching. Regions are normally a few KB; a
+ * PDF with no stream boundaries at all could otherwise grow this without limit.
+ */
+const MAX_PENDING_OBJECT_BYTES = 8 * 1024 * 1024;
+
+/** Drop consumed bytes once this much has accumulated behind the region start. */
+const COMPACT_THRESHOLD_BYTES = 256 * 1024;
 
 /** How far back from a `stream` keyword to look for the object's dictionary. */
 const DICT_LOOKBACK = 4096;
+
+/** Bytes kept behind the region start so the `endstream` prefix test always has context. */
+const LOOKBACK_MARGIN = 3;
 
 const STREAM_KEYWORD = 'stream';
 const END_STREAM_KEYWORD = 'endstream';
@@ -75,10 +116,8 @@ const ACTIVE_CONTENT_RULES: ActiveContentRule[] = [
 export type PdfActiveContentScan =
   | { outcome: 'clean' }
   | { outcome: 'blocked'; errorMessage: string; diagnostic: string }
-  /** Encrypted, oversized, or partly undecompressable — a clean result would not be meaningful. */
+  /** Encrypted or partly undecompressable — a clean result would not be meaningful. */
   | { outcome: 'inconclusive'; diagnostic: string };
-
-type StreamRegion = { bodyStart: number; bodyEnd: number };
 
 function blocked(rule: ActiveContentRule, where: string): PdfActiveContentScan {
   return {
@@ -86,45 +125,6 @@ function blocked(rule: ActiveContentRule, where: string): PdfActiveContentScan {
     errorMessage: `PDF rejected: it contains ${rule.reason}. This can run code when the document is opened.`,
     diagnostic: `matched ${rule.pattern} in ${where}`,
   };
-}
-
-/**
- * Locate every stream body by position, in one linear pass over the bytes.
- *
- * Occurrences of `stream` that are the tail of `endstream` are skipped: matching them would
- * anchor the body at the wrong place and swallow the object definitions that follow — which is
- * how a CR-only `stream\r` line ending previously hid a JavaScript action from the scan.
- * All three line endings after the keyword (`\r\n`, `\n`, `\r`) are accepted.
- */
-function findStreamRegions(buf: Buffer): { regions: StreamRegion[]; truncated: boolean } {
-  const regions: StreamRegion[] = [];
-  let pos = 0;
-
-  while (regions.length < MAX_STREAMS_INSPECTED) {
-    const keyword = buf.indexOf(STREAM_KEYWORD, pos, 'latin1');
-    if (keyword === -1) return { regions, truncated: false };
-
-    if (keyword >= 3 && buf.toString('latin1', keyword - 3, keyword) === 'end') {
-      pos = keyword + STREAM_KEYWORD.length;
-      continue;
-    }
-
-    let bodyStart = keyword + STREAM_KEYWORD.length;
-    if (buf[bodyStart] === CR) bodyStart++;
-    if (buf[bodyStart] === LF) bodyStart++;
-
-    const bodyEnd = buf.indexOf(END_STREAM_KEYWORD, bodyStart, 'latin1');
-    if (bodyEnd === -1) {
-      // Unterminated stream: treat the remainder as body rather than scanning binary as text.
-      regions.push({ bodyStart, bodyEnd: buf.length });
-      return { regions, truncated: false };
-    }
-
-    regions.push({ bodyStart, bodyEnd });
-    pos = bodyEnd + END_STREAM_KEYWORD.length;
-  }
-
-  return { regions, truncated: buf.indexOf(STREAM_KEYWORD, pos, 'latin1') !== -1 };
 }
 
 /**
@@ -149,7 +149,34 @@ function matchRule(chunk: string): ActiveContentRule | null {
   return null;
 }
 
-/** Inflate a Flate stream off the event loop, refusing to allocate more than the per-stream cap. */
+/**
+ * Sequential chunks of the upload.
+ *
+ * The read buffer is reused between iterations, so a consumer that keeps bytes must copy them.
+ * The scanner concatenates into `pending`, which copies.
+ */
+async function* readChunks(file: UploadFile): AsyncGenerator<Buffer> {
+  if (file.buffer) {
+    for (let offset = 0; offset < file.buffer.length; offset += CHUNK_BYTES) {
+      yield file.buffer.subarray(offset, Math.min(offset + CHUNK_BYTES, file.buffer.length));
+    }
+    return;
+  }
+
+  const handle = await open(file.filepath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(CHUNK_BYTES);
+    for (;;) {
+      const { bytesRead } = await handle.read(buf, 0, CHUNK_BYTES, null);
+      if (bytesRead <= 0) return;
+      yield buf.subarray(0, bytesRead);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Inflate a Flate stream, refusing to allocate more than the per-stream cap. */
 function tryInflate(bytes: Buffer): Promise<Buffer | null> {
   const options = { maxOutputLength: MAX_INFLATED_BYTES_PER_STREAM };
   return new Promise((resolve) => {
@@ -162,70 +189,96 @@ function tryInflate(bytes: Buffer): Promise<Buffer | null> {
 }
 
 /**
- * Scan an already-validated PDF for executable active content.
- * `buffer` must be the whole file; callers gate this behind the size limit.
+ * Find the next real `stream` keyword at or after `from`.
+ *
+ * Occurrences that are the tail of `endstream` are skipped: matching them would anchor the body at
+ * the wrong place and swallow the object definitions that follow — which is how a CR-only
+ * `stream\r` line ending previously hid a JavaScript action from the scan.
  */
-export async function scanPdfActiveContent(buffer: Buffer): Promise<PdfActiveContentScan> {
-  if (buffer.length > MAX_SCAN_BYTES) {
-    return {
-      outcome: 'inconclusive',
-      diagnostic: `file is ${Math.round(buffer.length / (1024 * 1024))}MB, above the ${MAX_SCAN_BYTES / (1024 * 1024)}MB active-content scan limit`,
-    };
+function indexOfStreamKeyword(buf: Buffer, from: number): number {
+  let pos = from;
+  for (;;) {
+    const at = buf.indexOf(STREAM_KEYWORD, pos, 'latin1');
+    if (at === -1) return -1;
+    if (at >= LOOKBACK_MARGIN && buf.toString('latin1', at - LOOKBACK_MARGIN, at) === 'end') {
+      pos = at + STREAM_KEYWORD.length;
+      continue;
+    }
+    return at;
   }
+}
+
+type ScanState = {
+  mode: 'objects' | 'stream';
+  /** Buffered bytes not yet released. */
+  pending: Buffer;
+  /** Start of the current object-definition region, or of the unconsumed stream body. */
+  regionStart: number;
+  /** Search position; never behind `regionStart`. */
+  cursor: number;
+  /** Set by `scanObjectRegion`: the dictionary just read declares `/ObjStm`. */
+  lastRegionWasObjStm: boolean;
+  /** The stream being skipped is an /ObjStm, so its body must be inflated and scanned. */
+  inObjStm: boolean;
+  objStmInput: Buffer[];
+  objStmInputBytes: number;
+  objStmOverflowed: boolean;
+  objStmInflated: number;
+  encrypted: boolean;
+  undecompressed: number;
+  totalInflated: number;
+};
+
+/**
+ * Scan a PDF for executable active content.
+ *
+ * Reads the file in chunks; peak memory is bounded by the caps above regardless of file size, so
+ * there is no size at which this declines to look.
+ */
+export async function scanPdfActiveContent(file: UploadFile): Promise<PdfActiveContentScan> {
+  const state: ScanState = {
+    mode: 'objects',
+    pending: Buffer.alloc(0),
+    regionStart: 0,
+    cursor: 0,
+    lastRegionWasObjStm: false,
+    inObjStm: false,
+    objStmInput: [],
+    objStmInputBytes: 0,
+    objStmOverflowed: false,
+    objStmInflated: 0,
+    encrypted: false,
+    undecompressed: 0,
+    totalInflated: 0,
+  };
 
   try {
-    const { regions, truncated } = findStreamRegions(buffer);
+    for await (const chunk of readChunks(file)) {
+      state.pending =
+        state.pending.length === 0 ? Buffer.from(chunk) : Buffer.concat([state.pending, chunk]);
 
-    let encrypted = false;
-    let undecompressed = 0;
-    let totalInflated = 0;
+      const hit = await advance(state, false);
+      if (hit) return hit;
 
-    // Walk the gaps between stream bodies — the object definitions — converting one at a time.
-    let cursor = 0;
-    for (let i = 0; i <= regions.length; i++) {
-      const segmentEnd = i < regions.length ? regions[i].bodyStart : buffer.length;
-
-      if (segmentEnd > cursor) {
-        const segment = buffer.toString('latin1', cursor, segmentEnd);
-        const hit = matchRule(segment);
-        if (hit) return blocked(hit, 'an object definition');
-        if (!encrypted && /\/Encrypt\b/.test(segment)) encrypted = true;
-
-        // Only object streams hold object definitions; other streams are skipped by design.
-        if (i < regions.length && /\/ObjStm\b/.test(segment.slice(-DICT_LOOKBACK))) {
-          if (totalInflated >= MAX_TOTAL_INFLATED_BYTES) {
-            undecompressed++;
-          } else {
-            const inflated = await tryInflate(buffer.subarray(regions[i].bodyStart, regions[i].bodyEnd));
-            if (!inflated) {
-              undecompressed++;
-            } else {
-              totalInflated += inflated.length;
-              const objStmHit = matchRule(inflated.toString('latin1'));
-              if (objStmHit) return blocked(objStmHit, 'a compressed object stream');
-            }
-          }
-        }
-      }
-
-      if (i < regions.length) cursor = regions[i].bodyEnd;
-      // Keep the request loop responsive on files with many objects.
+      compact(state);
+      // Keep the request loop responsive on large files.
       await yieldToEventLoop();
     }
 
+    const hit = await advance(state, true);
+    if (hit) return hit;
+
     // `/Encrypt` means strings and streams are ciphertext, so a clean result proves nothing.
-    if (encrypted) {
+    if (state.encrypted) {
       return {
         outcome: 'inconclusive',
         diagnostic: 'PDF is encrypted — active-content scanning could not inspect its objects',
       };
     }
-    if (undecompressed > 0 || truncated) {
+    if (state.undecompressed > 0) {
       return {
         outcome: 'inconclusive',
-        diagnostic: truncated
-          ? `more than ${MAX_STREAMS_INSPECTED} streams — the remainder was not scanned`
-          : `${undecompressed} object stream(s) could not be decompressed or exceeded the scan budget`,
+        diagnostic: `${state.undecompressed} object stream(s) could not be decompressed or exceeded the scan budget`,
       };
     }
 
@@ -233,4 +286,176 @@ export async function scanPdfActiveContent(buffer: Buffer): Promise<PdfActiveCon
   } catch {
     return { outcome: 'inconclusive', diagnostic: 'active-content scan failed to parse the file' };
   }
+}
+
+/** Release bytes behind the region start once enough have built up. */
+function compact(state: ScanState) {
+  const dropTo = state.regionStart - LOOKBACK_MARGIN;
+  if (dropTo < COMPACT_THRESHOLD_BYTES) return;
+  state.pending = Buffer.from(state.pending.subarray(dropTo));
+  state.regionStart -= dropTo;
+  state.cursor -= dropTo;
+}
+
+/**
+ * Consume as much of `pending` as possible, alternating between object-definition regions
+ * (scanned) and stream bodies (skipped, except object streams).
+ *
+ * `atEof` releases the retained tails that exist only so a keyword split across a chunk boundary
+ * can still be found.
+ */
+async function advance(state: ScanState, atEof: boolean): Promise<PdfActiveContentScan | null> {
+  for (;;) {
+    if (state.mode === 'objects') {
+      const keywordAt = indexOfStreamKeyword(state.pending, state.cursor);
+
+      if (keywordAt === -1) {
+        // Resume just far enough back that a keyword split across chunks is still found.
+        state.cursor = Math.max(state.regionStart, state.pending.length - (STREAM_KEYWORD.length - 1));
+
+        const regionLength = state.pending.length - state.regionStart;
+        if (atEof || regionLength > MAX_PENDING_OBJECT_BYTES) {
+          const hit = scanObjectRegion(state, state.pending.length);
+          if (hit) return hit;
+
+          if (atEof) {
+            state.regionStart = state.pending.length;
+            state.cursor = state.pending.length;
+          } else {
+            // Keep a lookback window: the rules span tens of bytes, so a DICT_LOOKBACK overlap
+            // cannot hide a match, and the window doubles as dictionary context for `/ObjStm`.
+            state.regionStart = Math.max(0, state.pending.length - DICT_LOOKBACK);
+            state.cursor = Math.max(state.regionStart, state.cursor);
+          }
+        }
+        return null;
+      }
+
+      // The line ending after `stream` decides where the body starts, so wait for both bytes.
+      if (!atEof && state.pending.length < keywordAt + STREAM_KEYWORD.length + 2) {
+        state.cursor = keywordAt;
+        return null;
+      }
+
+      const hit = scanObjectRegion(state, keywordAt);
+      if (hit) return hit;
+
+      let bodyStart = keywordAt + STREAM_KEYWORD.length;
+      if (state.pending[bodyStart] === CR) bodyStart++;
+      if (state.pending[bodyStart] === LF) bodyStart++;
+
+      state.inObjStm = state.lastRegionWasObjStm;
+      state.objStmInput = [];
+      state.objStmInputBytes = 0;
+      state.objStmOverflowed = false;
+      state.mode = 'stream';
+      state.regionStart = bodyStart;
+      state.cursor = bodyStart;
+      continue;
+    }
+
+    // --- stream mode: skip the body, capturing it only when it is an object stream ---
+    const endAt = state.pending.indexOf(END_STREAM_KEYWORD, state.cursor, 'latin1');
+
+    if (endAt === -1) {
+      // Everything but a possible split keyword can be released.
+      const consumableEnd = atEof
+        ? state.pending.length
+        : Math.max(state.regionStart, state.pending.length - (END_STREAM_KEYWORD.length - 1));
+
+      if (consumableEnd > state.regionStart) {
+        if (state.inObjStm) {
+          collectObjStm(state, state.pending.subarray(state.regionStart, consumableEnd));
+        }
+        state.regionStart = consumableEnd;
+      }
+      state.cursor = state.regionStart;
+
+      if (atEof) {
+        // Unterminated stream. Inflate what was captured rather than discarding it.
+        const hit = await flushObjStm(state);
+        if (hit) return hit;
+        state.mode = 'objects';
+      }
+      return null;
+    }
+
+    if (state.inObjStm) {
+      collectObjStm(state, state.pending.subarray(state.regionStart, endAt));
+    }
+    const hit = await flushObjStm(state);
+    if (hit) return hit;
+
+    state.mode = 'objects';
+    state.regionStart = endAt + END_STREAM_KEYWORD.length;
+    state.cursor = state.regionStart;
+  }
+}
+
+/**
+ * Match the object-definition region `[regionStart, end)`, note `/Encrypt`, and record whether its
+ * dictionary declares `/ObjStm` so the stream that follows is inflated.
+ */
+function scanObjectRegion(state: ScanState, end: number): PdfActiveContentScan | null {
+  if (end <= state.regionStart) {
+    state.lastRegionWasObjStm = false;
+    return null;
+  }
+
+  const text = state.pending.toString('latin1', state.regionStart, end);
+  const rule = matchRule(text);
+  if (rule) return blocked(rule, 'an object definition');
+  if (!state.encrypted && /\/Encrypt\b/.test(text)) state.encrypted = true;
+
+  state.lastRegionWasObjStm = /\/ObjStm\b/.test(
+    text.length > DICT_LOOKBACK ? text.slice(-DICT_LOOKBACK) : text
+  );
+  return null;
+}
+
+/** Accumulate compressed object-stream bytes, up to the input cap. */
+function collectObjStm(state: ScanState, bytes: Buffer) {
+  if (state.objStmOverflowed || bytes.length === 0) return;
+  if (state.objStmInputBytes + bytes.length > MAX_OBJSTM_INPUT_BYTES) {
+    state.objStmOverflowed = true;
+    state.objStmInput = [];
+    state.objStmInputBytes = 0;
+    return;
+  }
+  state.objStmInput.push(Buffer.from(bytes));
+  state.objStmInputBytes += bytes.length;
+}
+
+/** Inflate and scan the object stream just finished, then reset its buffers. */
+async function flushObjStm(state: ScanState): Promise<PdfActiveContentScan | null> {
+  if (!state.inObjStm) return null;
+
+  const overflowed = state.objStmOverflowed;
+  const input = state.objStmInputBytes > 0 ? Buffer.concat(state.objStmInput) : Buffer.alloc(0);
+
+  state.inObjStm = false;
+  state.objStmInput = [];
+  state.objStmInputBytes = 0;
+  state.objStmOverflowed = false;
+
+  const budgetSpent =
+    state.objStmInflated >= MAX_OBJECT_STREAMS_INFLATED ||
+    state.totalInflated >= MAX_TOTAL_INFLATED_BYTES;
+
+  if (overflowed || budgetSpent) {
+    state.undecompressed++;
+    return null;
+  }
+  if (input.length === 0) return null;
+
+  state.objStmInflated++;
+  const inflated = await tryInflate(input);
+  if (!inflated) {
+    state.undecompressed++;
+    return null;
+  }
+
+  state.totalInflated += inflated.length;
+  const rule = matchRule(inflated.toString('latin1'));
+  return rule ? blocked(rule, 'a compressed object stream') : null;
 }

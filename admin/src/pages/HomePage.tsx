@@ -29,6 +29,7 @@ import {
   type ConversionStats,
   type ConversionFile,
   type SettingsLimits,
+  type UploadLimitInfo,
 } from '../utils/pluginRequest';
 
 /* ------------------------------------------------------------------ */
@@ -38,20 +39,21 @@ import {
 const UploadOptimizationPanel = () => {
   /** Ranges come from the server with the settings payload — never hardcoded here. */
   const [limits, setLimits] = useState<SettingsLimits>({
-    minPdfSizeMb: 1,
-    maxPdfSizeMb: 500,
+    minSvgSizeMb: 1,
+    maxSvgSizeMb: 50,
     minWebpQuality: 1,
     maxWebpQuality: 100,
     supportedFileExtensions: [],
     supportedFileExtensionGroups: [],
     defaultFileExtensions: [],
   });
+  const [uploadLimit, setUploadLimit] = useState<UploadLimitInfo | null>(null);
   const [quality, setQuality] = useState(82);
   const [enabled, setEnabled] = useState(true);
   const [pdfValidation, setPdfValidation] = useState(true);
   const [blockActiveContent, setBlockActiveContent] = useState(true);
   /** Held as a string so the field can be cleared while typing; validated on save. */
-  const [maxPdfSize, setMaxPdfSize] = useState('25');
+  const [maxSvgSize, setMaxSvgSize] = useState('5');
   const [typePolicy, setTypePolicy] = useState(true);
   const [allowedExtensions, setAllowedExtensions] = useState<string[]>([]);
   const [blockMultiExt, setBlockMultiExt] = useState(true);
@@ -65,12 +67,13 @@ const UploadOptimizationPanel = () => {
     setLoading(true);
     setMsg(null);
     try {
-      const { settings: s, limits: l } = await getSettings();
+      const { settings: s, limits: l, uploadLimit: ul } = await getSettings();
       setLimits(l);
+      setUploadLimit(ul);
       setQuality(s.webpQuality);
       setEnabled(s.webpConversionEnabled);
       setPdfValidation(s.pdfValidationEnabled);
-      setMaxPdfSize(String(s.maxPdfSizeMb));
+      setMaxSvgSize(String(s.maxSvgSizeMb));
       setBlockActiveContent(s.blockPdfActiveContent);
       setTypePolicy(s.fileTypePolicyEnabled);
       setAllowedExtensions(s.allowedFileExtensions ?? []);
@@ -107,14 +110,14 @@ const UploadOptimizationPanel = () => {
   useEffect(() => { void load(); }, [load]);
 
   const save = async () => {
-    const parsedPdfSize = Number(maxPdfSize);
+    const parsedSvgSize = Number(maxSvgSize);
     if (
-      !Number.isFinite(parsedPdfSize) ||
-      parsedPdfSize < limits.minPdfSizeMb ||
-      parsedPdfSize > limits.maxPdfSizeMb
+      !Number.isFinite(parsedSvgSize) ||
+      parsedSvgSize < limits.minSvgSizeMb ||
+      parsedSvgSize > limits.maxSvgSizeMb
     ) {
       setMsgVariant('danger');
-      setMsg(`Maximum PDF size must be between ${limits.minPdfSizeMb} and ${limits.maxPdfSizeMb} MB.`);
+      setMsg(`Maximum SVG size must be between ${limits.minSvgSizeMb} and ${limits.maxSvgSizeMb} MB.`);
       return;
     }
     if (typePolicy && allowedExtensions.length === 0) {
@@ -129,14 +132,14 @@ const UploadOptimizationPanel = () => {
         webpQuality: quality,
         webpConversionEnabled: enabled,
         pdfValidationEnabled: pdfValidation,
-        maxPdfSizeMb: parsedPdfSize,
+        maxSvgSizeMb: parsedSvgSize,
         blockPdfActiveContent: blockActiveContent,
         fileTypePolicyEnabled: typePolicy,
         allowedFileExtensions: allowedExtensions,
         blockMultipleExtensions: blockMultiExt,
         randomizeStoredFilenames: randomizeNames,
       });
-      setMaxPdfSize(String(saved.maxPdfSizeMb));
+      setMaxSvgSize(String(saved.maxSvgSizeMb));
       setAllowedExtensions(saved.allowedFileExtensions ?? []);
       setMsgVariant('success');
       setMsg('Settings saved.');
@@ -225,31 +228,72 @@ const UploadOptimizationPanel = () => {
           </Checkbox>
           <Box paddingTop={1}>
             <Typography variant="pi" textColor="neutral500">
-              Covers compressed PDFs too. Interactive PDF forms that use scripts for field
+              Covers compressed PDFs too, at any file size — the scan streams, so a large PDF is
+              checked as thoroughly as a small one. Interactive PDF forms that use scripts for field
               validation will be rejected — untick this if you need to publish one.
             </Typography>
           </Box>
         </Box>
 
+        <Divider />
+
+        <Box>
+          <Typography variant="delta" tag="h2">Upload size</Typography>
+          <Box paddingTop={1}>
+            <Typography variant="omega" textColor="neutral600">
+              The plugin applies no size limit of its own — it uses whatever your project allows, so
+              there is one value to change and one place to change it.
+            </Typography>
+          </Box>
+        </Box>
+
+        <Box padding={4} background="neutral100" hasRadius>
+          {uploadLimit ? (
+            <>
+              <Typography variant="omega" fontWeight="bold" textColor="neutral800">
+                Maximum upload size: {uploadLimit.formatted}
+              </Typography>
+              <Box paddingTop={1}>
+                <Typography variant="pi" textColor="neutral600">
+                  Inherited from {uploadLimit.source}. To change it, set{' '}
+                  <code>formidable.maxFileSize</code> on <code>strapi::body</code> in{' '}
+                  <code>config/middlewares.ts</code> and restart Strapi.
+                </Typography>
+              </Box>
+            </>
+          ) : (
+            <Typography variant="omega" textColor="neutral600">
+              Upload size limit is set by your project configuration.
+            </Typography>
+          )}
+        </Box>
+
         <Box>
           <Field.Root
-            name="maxPdfSizeMb"
-            hint={`Uploads larger than this are rejected. ${limits.minPdfSizeMb}–${limits.maxPdfSizeMb} MB. Default 25.`}
+            name="maxSvgSizeMb"
+            hint={`SVGs above this are rejected. ${limits.minSvgSizeMb}–${limits.maxSvgSizeMb} MB. Default 5.`}
           >
-            <Field.Label>Maximum PDF size (MB)</Field.Label>
+            <Field.Label>Maximum SVG size (MB)</Field.Label>
             <Box style={{ maxWidth: 200 }}>
               <Field.Input
                 type="number"
-                min={limits.minPdfSizeMb}
-                max={limits.maxPdfSizeMb}
+                min={limits.minSvgSizeMb}
+                max={limits.maxSvgSizeMb}
                 step={1}
-                value={maxPdfSize}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => setMaxPdfSize(e.target.value)}
-                disabled={loading || saving || !pdfValidation}
+                value={maxSvgSize}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setMaxSvgSize(e.target.value)}
+                disabled={loading || saving}
               />
             </Box>
             <Field.Hint />
           </Field.Root>
+          <Box paddingTop={1}>
+            <Typography variant="pi" textColor="neutral500">
+              The one exception to the inherited limit. SVG rules are matched against the whole
+              decoded document, so it has to be read in full — and a multi-megabyte SVG is
+              machine-generated junk or an attack rather than artwork.
+            </Typography>
+          </Box>
         </Box>
 
         <Divider />
