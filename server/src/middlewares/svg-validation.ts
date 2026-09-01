@@ -161,13 +161,17 @@ export async function validateSvgFile(
 
     const { text, encoding } = decodeSvgText(raw);
 
-    // If the decoded text has no <svg> element at all, the bytes were not interpreted the way
-    // the browser will interpret them — an encoding we don't handle, or binary. Refusing beats
-    // scanning gibberish and calling it clean.
+    // No <svg> element in the decoded text means one of two things: the file is not an SVG at all,
+    // or it uses an encoding we did not interpret the way a browser would. Both are refusals —
+    // scanning gibberish and calling it clean is the one outcome that must not happen.
+    //
+    // The message covers both because this branch cannot tell them apart, and because it is now
+    // reachable by ordinary non-SVG XML: `application/xml` is an accepted detection for `.svg`, so
+    // an XML file wearing that extension gets here rather than being stopped by the type gate.
     if (!/<\s*(?:[a-z0-9-]+:)?svg[\s>/]/i.test(text)) {
       return {
         outcome: 'invalid',
-        errorMessage: `SVG could not be read for validation (decoded as ${encoding}). Re-save it as UTF-8 and upload again.`,
+        errorMessage: `SVG rejected: no svg element was found. The file is not an SVG, or uses a text encoding that cannot be read (decoded as ${encoding}).`,
       };
     }
 

@@ -1,5 +1,5 @@
 {
-  "version": "3.0.0",
+  "version": "3.0.3",
   "keywords": [
     "strapi",
     "strapi-plugin",
@@ -9,8 +9,12 @@
     "s3",
     "migration",
     "optimization",
+    "webp-converter",
     "webp-convertor",
+    "image-converter",
     "image-convertor",
+    "image-optimization",
+    "file-upload",
     "upload-validation",
     "upload-security",
     "magic-bytes",
@@ -20,7 +24,9 @@
     "file-type-validation",
     "file-upload-security",
     "malicious-file-upload",
-    "allowed-file-types"
+    "allowed-file-types",
+    "media-library",
+    "strapi5"
   ],
   "type": "commonjs",
   "engines": {
@@ -92,10 +98,10 @@
     "kind": "plugin",
     "name": "strapi-media-webp-convertor",
     "displayName": "Media WebP & Migration",
-    "description": "WebP upload optimization, tunable quality, and S3 / URL migration helpers."
+    "description": "Upload security and WebP optimization: blocks malicious file uploads, validates SVG and PDF content, converts images to WebP, and migrates media to S3."
   },
   "name": "strapi-plugin-media-webp-convertor",
-  "description": "Strapi 5 plugin: WebP upload optimization, admin quality settings, and migration helpers for S3 + DB URLs.",
+  "description": "Secure and optimize Strapi 5 uploads: blocks malicious file uploads with magic-byte file type validation, scans SVG and PDF content, converts images to WebP, and migrates media to S3.",
   "license": "MIT",
   "author": "girish-soman",
   "repository": {
