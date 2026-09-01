@@ -66,8 +66,14 @@ export const EXTENSION_RULES: Record<string, ExtensionRule> = {
     group: 'image',
     detectedMimes: ['image/heic', 'image/heic-sequence', 'image/heif', 'image/heif-sequence'],
   },
-  // XML, so undetectable by signature. The SVG scanner is what actually clears it.
-  svg: { group: 'image', detectedMimes: [], textBased: true },
+  /**
+   * SVG is XML, so it has no binary signature — but `file-type` *does* recognise a literal `<?xml`
+   * at byte 0 and reports `application/xml`. Illustrator, Inkscape and Sketch all emit that prolog,
+   * so leaving this list empty rejected every designer-exported SVG while icon-set and SVGO output
+   * (which omit the prolog) passed. `textBased` stays for the prolog-less case; both paths now reach
+   * `validateSvgFile`, which is where SVG safety actually belongs.
+   */
+  svg: { group: 'image', detectedMimes: ['application/xml'], textBased: true },
 
   // ---- Documents ----------------------------------------------------------
   pdf: { group: 'document', detectedMimes: ['application/pdf'] },
