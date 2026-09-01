@@ -365,6 +365,26 @@ Super Admin has everything. For other roles, **Settings → Roles → Media WebP
 
 ## Upgrading
 
+### 3.0.0 — breaking
+
+**`maxPdfSizeMb` has been removed.** The plugin now inherits your project's
+[upload limit](#upload-size) instead of holding a second, smaller number of its own. Delete the key
+from `config/plugins.ts`; it is ignored rather than an error.
+
+Two consequences:
+
+- **PDFs larger than the old 25 MB default are now accepted**, up to whatever your project allows
+  (200 MB out of the box). If you relied on `maxPdfSizeMb` as a business rule, that rule is gone —
+  set the ceiling in `config/middlewares.ts` instead, where it applies to every type.
+- **Large PDFs are now scanned rather than waved through.** The old scanner buffered the whole file
+  and gave up above 64 MB, and giving up meant *storing* the file with a warning. It streams now, so
+  raising the ceiling no longer weakens the check. The two changes shipped together for that reason:
+  removing the size cap alone would have been unsafe.
+
+`maxSvgSizeMb` (default 5) replaces it as the only size setting the plugin owns.
+
+### 2.x — upload validation
+
 Upload validation is **on by default**, so files that previously uploaded may now be refused. Stored
 media is never touched — only new uploads are affected.
 
@@ -389,11 +409,6 @@ re-enabled.
 | `.svgz` | Cannot be scanned | Upload it uncompressed |
 | PDF with JavaScript or `/Launch` | `blockPdfActiveContent` | Untick the setting |
 | A `.pdf` that isn't one, or is truncated | `pdfValidationEnabled` | Untick the setting |
-
-**`maxPdfSizeMb` has been removed.** The plugin inherits your project's upload limit instead. Delete
-it from `config/plugins.ts` — it is ignored. PDFs up to your project's limit are now accepted *and*
-fully scanned; the two changes shipped together because removing the old 25 MB cap alone would have
-been unsafe while the scanner still gave up above 64 MB.
 
 ---
 
