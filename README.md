@@ -28,6 +28,10 @@ media between local storage and S3.
 
 ```bash
 npm install strapi-plugin-media-webp-convertor
+# or
+yarn add strapi-plugin-media-webp-convertor
+# or
+pnpm add strapi-plugin-media-webp-convertor
 ```
 
 Enable it in `config/plugins.ts` (or `.js`):
