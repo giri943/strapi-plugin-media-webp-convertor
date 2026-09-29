@@ -1,8 +1,8 @@
 import type { Core } from '@strapi/strapi';
-import sharp from 'sharp';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { FILE_MODEL_UID } from '../constants';
+import { getSharp } from '../host-sharp';
 
 const CONVERTIBLE_MIMES = new Set([
   'image/jpeg',
@@ -27,8 +27,13 @@ async function downloadBuffer(url: string, publicDir: string): Promise<Buffer> {
   return fs.promises.readFile(path.join(publicDir, rel));
 }
 
-async function toWebPBuffer(buffer: Buffer, quality: number, lossless = false): Promise<Buffer> {
-  const pipeline = sharp(buffer, { failOn: 'error' }).rotate();
+async function toWebPBuffer(
+  strapi: Core.Strapi,
+  buffer: Buffer,
+  quality: number,
+  lossless = false
+): Promise<Buffer> {
+  const pipeline = getSharp(strapi)(buffer, { failOn: 'error' }).rotate();
   return lossless ? pipeline.webp({ lossless: true }).toBuffer() : pipeline.webp({ quality }).toBuffer();
 }
 
@@ -117,7 +122,7 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
           // Download and convert main file
           const origBuf = await downloadBuffer(record.url, publicDir);
           const isLossless = losslessSet.has(record.mime);
-          const webpBuf = await toWebPBuffer(origBuf, quality, isLossless);
+          const webpBuf = await toWebPBuffer(strapi, origBuf, quality, isLossless);
 
           const newSizeKB = Math.round((webpBuf.length / 1024) * 100) / 100;
 
@@ -143,7 +148,7 @@ export default ({ strapi }: { strapi: Core.Strapi }) => {
               const fmt = fmtVal as any;
               try {
                 const fmtBuf = await downloadBuffer(fmt.url, publicDir);
-                const fmtWebp = await toWebPBuffer(fmtBuf, quality, isLossless);
+                const fmtWebp = await toWebPBuffer(strapi, fmtBuf, quality, isLossless);
                 const newFmtFile: any = {
                   name: swapToWebpName(fmt.name),
                   hash: fmt.hash,
