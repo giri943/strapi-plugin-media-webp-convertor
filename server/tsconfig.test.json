@@ -1,0 +1,9 @@
+{
+  "extends": "@strapi/typescript-utils/tsconfigs/server",
+  "include": ["./src", "./tests"],
+  "compilerOptions": {
+    "rootDir": "../",
+    "ignoreDeprecations": "5.0",
+    "noEmit": true
+  }
+}

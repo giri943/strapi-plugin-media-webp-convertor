@@ -416,6 +416,23 @@ re-enabled.
 
 ---
 
+## Development
+
+```bash
+yarn test            # vitest, run once
+yarn test:watch      # vitest, watch mode
+yarn test:ts:back    # type-check the server
+yarn test:ts:tests   # type-check the tests
+yarn build           # build dist/
+```
+
+The suite covers the upload endpoint matcher across every Strapi 5 route layout, the size-limit
+resolver, the filename and type policy against the penetration-test payloads, SVG scanning including
+the XML-prolog case, and the streaming PDF scanner at chunk boundaries and above 64 MB. If a future
+Strapi release moves an upload endpoint again, `yarn test` is what should fail.
+
+---
+
 ## Known warnings
 
 `webpsave_buffer: no property named 'smart_deblock'` — harmless. libvips older than 8.14.5 doesn't
