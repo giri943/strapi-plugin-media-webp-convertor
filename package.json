@@ -1,5 +1,5 @@
 {
-  "version": "3.0.3",
+  "version": "3.0.4",
   "keywords": [
     "strapi",
     "strapi-plugin",
@@ -60,8 +60,11 @@
     "watch": "strapi-plugin watch",
     "watch:link": "strapi-plugin watch:link",
     "verify": "strapi-plugin verify",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:ts:front": "npx tsc -p admin/tsconfig.json --noEmit",
-    "test:ts:back": "npx tsc -p server/tsconfig.json --noEmit"
+    "test:ts:back": "npx tsc -p server/tsconfig.json --noEmit",
+    "test:ts:tests": "npx tsc -p server/tsconfig.test.json --noEmit"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1052.0",
@@ -81,7 +84,8 @@
     "react-intl": "^6.8.9",
     "react-router-dom": "^6.30.3",
     "styled-components": "^6.4.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "3.2.7"
   },
   "peerDependencies": {
     "@strapi/design-system": "^2.0.0-rc.30",

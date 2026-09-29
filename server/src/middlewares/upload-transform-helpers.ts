@@ -1,7 +1,7 @@
 import FileType from 'file-type';
 import { readFile, writeFile } from 'fs/promises';
 import path from 'path';
-import sharp from 'sharp';
+import { getSharp } from '../host-sharp';
 import type { Core } from '@strapi/strapi';
 import { PLUGIN_NAME } from '../constants';
 import { applyFileTypePolicy } from './file-type-policy';
@@ -151,16 +151,36 @@ export function syncFileInfoNameWithMultipartFile(
 }
 
 
+/**
+ * Every endpoint that accepts multipart file bytes, verified against `@strapi/upload`'s own route
+ * tables rather than inferred from the admin panel's network traffic:
+ *
+ * - `POST /upload` — the classic multiplexer, which also handles replace (`?id=`) and fileInfo-only
+ *   updates. Present in every Strapi 5 release.
+ * - `POST /api/upload` — the content API equivalent.
+ * - `POST /upload/unstable/stream` — the SSE streaming upload used when the `unstableMediaLibrary`
+ *   future flag is on, up to 5.52.
+ * - `POST /upload/files` and `POST /upload/files/:id/replace` — added in 5.53, when the admin media
+ *   library moved off the classic multiplexer to one request per file. These carry POST despite
+ *   `/upload/files` also serving GET; matching only the classic path is why uploads bypassed this
+ *   middleware on 5.53 and later.
+ *
+ * Leading segments are unanchored so a mounted or proxied prefix (`/admin/upload`, `/cms/api/upload`)
+ * still matches. Deliberately *not* matched: `/upload/folders`, `/upload/actions/*` and
+ * `/upload/unstable/stream-from-urls`, which take JSON rather than file bytes.
+ */
+const UPLOAD_ENDPOINT = /(?:^|\/)upload(?:\/files(?:\/[^/]+\/replace)?|\/unstable\/stream)?$/;
+
 export function isStrapiMultipartUpload(ctx: { request?: { method?: string; files?: { files?: unknown } }; path?: string }) {
   if (ctx.request?.method !== 'POST' || !ctx.request?.files?.files) return false;
   const p = (ctx.path || '').replace(/\/+$/, '') || ctx.path || '';
-  return p === '/upload' || p === '/api/upload' || p.endsWith('/upload') || p.includes('/plugins/upload');
+  return UPLOAD_ENDPOINT.test(p) || p.includes('/plugins/upload');
 }
 
 export async function convertRasterUploadToWebP(strapi: Core.Strapi, file: UploadFile, webpQuality: number) {
   const input = await readFile(file.filepath);
   try {
-    const webpBuffer = await sharp(input, { failOn: 'error' }).rotate().webp({ quality: webpQuality }).toBuffer();
+    const webpBuffer = await getSharp()(input, { failOn: 'error' }).rotate().webp({ quality: webpQuality }).toBuffer();
     await writeFile(file.filepath, webpBuffer);
     file.mimetype = 'image/webp';
     file.size = webpBuffer.length;
