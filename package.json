@@ -115,5 +115,9 @@
   "bugs": {
     "url": "https://github.com/giri943/strapi-plugin-media-webp-convertor/issues"
   },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/giri943"
+  },
   "homepage": "https://github.com/giri943/strapi-plugin-media-webp-convertor#readme"
 }

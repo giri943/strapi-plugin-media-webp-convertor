@@ -1,7 +1,17 @@
 # strapi-plugin-media-webp-convertor
 
+[![npm](https://img.shields.io/npm/v/strapi-plugin-media-webp-convertor)](https://www.npmjs.com/package/strapi-plugin-media-webp-convertor)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Sponsor](https://img.shields.io/github/sponsors/giri943?label=Sponsor&logo=GitHub)](https://github.com/sponsors/giri943)
+
 Converts uploads to WebP, refuses the files a media library shouldn't accept, and migrates existing
 media between local storage and S3.
+
+<p align="center">
+  <a href="https://github.com/giri943/strapi-plugin-media-webp-convertor/blob/master/assets/video/webp-converter-light.mp4">
+    <img src="https://raw.githubusercontent.com/giri943/strapi-plugin-media-webp-convertor/master/assets/video/webp-converter-light.webp" alt="Demo: an upload stored as WebP, 35% lighter, and an SVG with a script refused in the Strapi media library" width="800">
+  </a>
+</p>
 
 - **Auto-converts uploads** — JPEG, PNG, GIF, BMP, TIFF and HEIC become WebP before they reach
   storage. No content-type or frontend changes needed.
@@ -413,6 +423,14 @@ re-enabled.
 | `.svgz` | Cannot be scanned | Upload it uncompressed |
 | PDF with JavaScript or `/Launch` | `blockPdfActiveContent` | Untick the setting |
 | A `.pdf` that isn't one, or is truncated | `pdfValidationEnabled` | Untick the setting |
+
+---
+
+## Support this project
+
+This plugin is free and maintained in my spare time. If it saves your team storage and bandwidth,
+or helps you pass a security review, you can [sponsor it on GitHub](https://github.com/sponsors/giri943).
+It keeps fixes and new Strapi versions coming.
 
 ---
 
