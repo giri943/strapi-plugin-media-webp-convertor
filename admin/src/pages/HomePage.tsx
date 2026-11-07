@@ -12,6 +12,7 @@ import {
   Typography,
 } from '@strapi/design-system';
 import { Layouts } from '@strapi/strapi/admin';
+import { SupportFooter } from '../components/SupportFooter';
 import {
   getSettings,
   putSettings,
@@ -2409,6 +2410,7 @@ const HomePage = () => {
             </Tabs.Content>
           </Box>
         </Tabs.Root>
+        <SupportFooter />
       </Layouts.Content>
     </Layouts.Root>
   );
